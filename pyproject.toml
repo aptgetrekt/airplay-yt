@@ -1,0 +1,14 @@
+[project]
+name = "airplay-yt"
+version = "0.1.0"
+description = "Download a video from a URL, transcode it for AirPlay with hardware-accelerated ffmpeg, and stream it to an Apple TV"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+airplay-yt = "airplay_yt.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
