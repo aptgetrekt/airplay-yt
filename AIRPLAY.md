@@ -8,7 +8,7 @@ TL;DR:
 
 1. The actual streaming fix is **not our code**. It is an open, unreleased fix to
    `pyatv` (the `POST /command` *play-queue* protocol rewrite, upstream PR
-   **#2774 / #2899**), vendored verbatim into `vendor/pyatv/`.
+   **#2774 / #2899**), **linked as a git submodule** at `vendor/pyatv/`.
 2. A **small runtime monkey-patch** in our project — `src/airplay_yt/tvos_patch.py`
    — plugs the one remaining gap on tvOS 26.6/27: injecting the Apple `psi`
    that the modern receiver no longer hands back.
@@ -196,11 +196,13 @@ across versions.
 
 ## How to reproduce / test
 
-From the repository root (requires the venv with the editable `vendor/pyatv`
-already installed):
+From a freshly cloned repository the submodule must be initialized once (submodule
+contents are not pulled by a plain `git clone`): the editable venv
+`uv pip install -e vendor/pyatv` runs on top of that checkout.
 
 ```bash
 cd /home/theron/Git/airplay-yt
+git submodule update --init vendor/pyatv      # checks out the pinned b248409
 
 # one-liner smoke test (blocks for the full clip; Ctrl-C when confirmed)
 .venv/bin/python -m airplay_yt.airplay test.mp4 "Living Room Apple TV"
