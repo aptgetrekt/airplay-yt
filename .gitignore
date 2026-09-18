@@ -12,3 +12,4 @@ wheels/
 # Local test fixtures
 /test.mp4
 
+/test_videos/

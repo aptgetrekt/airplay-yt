@@ -1,13 +1,13 @@
 """Fetch a video from an input URL (e.g. YouTube) in the highest available quality.
 
-Downloads a single, self-contained media file -- best available video plus best
-available audio muxed together -- at the maximum quality yt-dlp can obtain, into a
-temporary location, and returns the local path to that file.
+Downloads a single, self-contained media file into a temporary location and
+returns the local path to it.
 
-The next stage (``transcoder.py``) is handed exactly one input, so the download
-always resolves to a single MP4 (the most broadly re-encodable container for the
-hardware-accelerated ffmpeg step). The file is left on disk for the caller: it is
-not deleted here because the transcoder still needs it.
+The rendition is chosen to play on Apple TV *without* transcoding: VP9 video (with
+automatic fallback to the highest available H.264), paired with the best AAC
+audio, all muxed into an mp4 container. The next stage therefore often just needs
+to hand this file to ``airplay.py``. The file is left on disk for the caller: it
+is not deleted here because the downstream stage still needs it.
 
 By default the file lands in a fresh, unique temp directory. Pass ``dest_dir`` to
 place it somewhere else instead.
@@ -25,14 +25,42 @@ import tempfile
 
 log = logging.getLogger(__name__)
 
-# yt-dlp can fetch the "best video" and "best audio" streams separately (YouTube
-# never serves one combined stream), so we pick each independently and let yt-dlp
-# merge them. The ``/b`` fallback handles sources that offer only a single
-# combined rendition.
-_BEST_FORMAT = "bv*+ba*/b"
+# The rendition must play on Apple TV *without* transcoding. Apple TV (tvOS)
+# decodes H.264/VP9 with AAC audio but NOT AV1 or Opus -- confirmed on playback:
+# an AV1/Opus file showed a black screen while its audio still played, so an
+# AV1/Opus render is useless for this pipeline and must never be selected.
+#
+# A bare format *sort* (the reference AirPlay command) is not enough: a "vcodec:
+# vp9" sort term only orders candidates; when yt-dlp's JS ("EJS") challenge solver
+# is unavailable some VP9 streams are dropped ("some formats may be missing") and a
+# higher-ranked AV1/Opus render can win. So we *cap* the candidate set with a
+# hard codec selector that excludes the non-playable codecs, and use the reference
+# sort only to *order* within the allowed set:
+#
+#   1. best VP9 video + best AAC (mp4a) audio                    <- preferred
+#     / best H.264 video + best AAC audio                        <- fallback ("h264")
+#     / best combined stream                                      <- last resort
+#
+# This yields the 4K VP9 + AAC file that plays on Apple TV, and falls back to the
+# best H.264 + AAC when a source has no VP9 ladder.
+_FORMAT_SELECTOR = (
+      "bv[vcodec^=vp9]+ba[acodec^=mp4a]"
+        "/bv[vcodec^=avc1]+ba[acodec^=mp4a]"
+        "/bv+ba/b"
+)
 
-# Force the merged (or single) output into MP4 so the transcoder always sees one
-# uniform input, regardless of the source container (webm, etc.).
+# Mirror the reference AirPlay sort so we get the *highest* quality within the
+# capped set; the hard codec cap above is what actually guarantees VP9/H.264 + AAC.
+_FORMAT_SORT = "vcodec:vp9,res,br,acodec:aac,ext:mp4:m4a"
+
+# yt-dlp's EJS challenge solver keeps the full VP9 ladder available. The Python
+# API expects a *list* of component specs (passing a string iterates its
+# characters and every char is rejected as an "unsupported component"), so it is
+# given as a list here and as a single CLI arg below.
+_REMOTE_COMPONENTS = ["ejs:github"]
+
+# Force the merged (or single) output into MP4 so downstream gets one uniform,
+# AirPlay-playable container regardless of the source container (webm, etc.).
 MERGE_FORMAT = "mp4"
 
 # Extra attempts for flaky networks / CDN fragment fetches.
@@ -69,12 +97,15 @@ def _ensure_ffmpeg() -> None:
 
 
 def _build_opts(url: str, out_dir: str) -> dict:
-    """Build yt-dlp options for a full-quality, single-file download into ``out_dir``."""
+    """Build yt-dlp options that select the best Apple-TV-playable rendition and
+    write a single merged MP4 into ``out_dir`` (see the codec-cap constants above)."""
     base = _safe_video_id(url)
     return {
         "outtmpl": os.path.join(out_dir, f"{base}.%(ext)s"),
         "merge_output_format": MERGE_FORMAT,
-        "format": _BEST_FORMAT,
+        "remote_components": _REMOTE_COMPONENTS,
+        "format": _FORMAT_SELECTOR,
+        "format_sort_expressions": _FORMAT_SORT,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": False,
@@ -112,7 +143,9 @@ def _download_via_cli(url: str, out_dir: str, base: str, opts: dict) -> str:
     _ensure_ffmpeg()
     cmd = [
         "yt-dlp",
-        "-f", opts["format"],
+        "--remote-components", ",".join(_REMOTE_COMPONENTS),
+        "-f", _FORMAT_SELECTOR,
+        "-S", _FORMAT_SORT,
         "--merge-output-format", MERGE_FORMAT,
         "--no-part",
         "--retries", str(_RETRIES),
@@ -132,7 +165,7 @@ def _download_via_module(url: str, out_dir: str, base: str, opts: dict) -> str:
     import yt_dlp
 
     _ensure_ffmpeg()
-    log.info("downloading %s (best quality) into %s", url, out_dir)
+    log.info("downloading %s (Apple-TV playable: VP9/H.264 + AAC) into %s", url, out_dir)
     ydl = yt_dlp.YoutubeDL(opts)
     try:
         info = ydl.extract_info(url, download=True)
@@ -155,7 +188,11 @@ def _module_available(name: str) -> bool:
 
 
 def download(url: str, dest_dir: str | None = None) -> str:
-    """Download the highest-quality rendition of ``url`` into a temp location.
+    """Download the highest-quality rendition of ``url`` that plays on Apple TV.
+    
+    Apple TV decodes H.264 + VP9 with AAC audio but not AV1 or Opus, so the
+    best such rendition (prefer VP9, fall back to H.264, always AAC) is selected
+    and written to a temp location without transcoding.
 
     Parameters
     ----------
@@ -169,8 +206,8 @@ def download(url: str, dest_dir: str | None = None) -> str:
     Returns
     -------
     str
-        Absolute path to the single merged, full-quality MP4 on disk. The file is
-        NOT deleted by this call; pass it to ``transcoder.transcode`` next.
+        Absolute path to the single merged MP4 on disk. The file is NOT deleted
+        by this call; pass it to ``transcoder.transcode`` next.
     """
     out_dir = os.path.abspath(dest_dir or tempfile.mkdtemp(prefix="airplay-yt-"))
     os.makedirs(out_dir, exist_ok=True)
