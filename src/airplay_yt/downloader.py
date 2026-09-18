@@ -143,6 +143,30 @@ def _resolve_output(out_dir: str, base: str, info: dict | None) -> str:
     return max(candidates, key=os.path.getmtime)
 
 
+def find_existing(url: str, dest_dir: str) -> str | None:
+    """Return a cached media file for ``url`` in ``dest_dir``, or ``None``.
+
+    A prior download of this same ``url`` into a persistent ``dest_dir`` would
+    have produced the file the same way :func:`_resolve_output` locates it, so
+    reuse the same matching order: the ``base.mp4`` that ``merge_output_format``
+    yields first, then any other ``base.*`` media file (newest wins). Incomplete
+    ``.ytdl``/``.part`` leftovers from an interrupted download are ignored.
+    """
+    base = _safe_video_id(url)
+    preferred = os.path.join(dest_dir, f"{base}.{MERGE_FORMAT}")
+    if os.path.isfile(preferred):
+        return os.path.abspath(preferred)
+
+    candidates = [
+        c for c in glob.glob(os.path.join(dest_dir, f"{base}.*"))
+        if os.path.isfile(c)
+        and not (c.endswith(".ytdl") or c.endswith(".part"))
+    ]
+    if not candidates:
+        return None
+    return os.path.abspath(max(candidates, key=os.path.getmtime))
+
+
 def _download_via_cli(url: str, out_dir: str, base: str, opts: dict) -> str:
     """Fallback: shell out to the ``yt-dlp`` binary when the module is absent."""
     _ensure_ffmpeg()

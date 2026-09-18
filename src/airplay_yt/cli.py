@@ -25,6 +25,10 @@ from airplay_yt import airplay, downloader
 # untouched.
 _TEMP_PREFIX = "airplay-yt-"
 
+# Where --keep stores the download by default, instead of the throwaway temp dir.
+# Overridable with --save-path.
+_DEFAULT_SAVE_DIR = "~/Videos/airplay-yt"
+
 
 def _cleanup(media_path: str, keep: bool) -> None:
     """Remove the temp download dir created for media_path unless keep is set."""
@@ -38,19 +42,43 @@ def _cleanup(media_path: str, keep: bool) -> None:
 
 
 def run(url: str, device: str | None = None, pin: str | None = None,
-        keep: bool = False) -> int:
+        keep: bool = False, save_path: str | None = None) -> int:
     """Download ``url`` then AirPlay it to the selected Apple TV.
+
+    With ``keep`` the download is written to a persistent directory
+    (``save_path``, defaulting to :data:`_DEFAULT_SAVE_DIR`) instead of a
+    throwaway temp dir; if a cached copy of the same URL is already there the
+    download is skipped and the existing file is streamed straight away.
 
     Returns a process exit code: 0 on success, 130 on user interrupt, 1 on any
     failure. Status is written to stderr so stdout stays pipe-friendly.
     """
-    # ---- 1. download (the downloader prints a live progress line to stderr) ----
-    print(f"[1/2] Downloading {url}", file=sys.stderr, flush=True)
-    try:
-        media_path = downloader.download(url)
-    except downloader.DownloadError as e:
-        print(f"download failed: {e}", file=sys.stderr, flush=True)
-        return 1
+    # ---- 1. obtain a local media file --------------------------------------
+    media_path: str
+    if keep:
+        out_dir = os.path.abspath(os.path.expanduser(save_path or _DEFAULT_SAVE_DIR))
+        os.makedirs(out_dir, exist_ok=True)
+        existing = downloader.find_existing(url, out_dir)
+        if existing:
+            media_path = existing
+            print(f"[1/2] Using existing {os.path.basename(media_path)} "
+                  f"(skipping download)", file=sys.stderr, flush=True)
+        else:
+            print(f"[1/2] Downloading {url} to {out_dir}",
+                  file=sys.stderr, flush=True)
+            try:
+                media_path = downloader.download(url, dest_dir=out_dir)
+            except downloader.DownloadError as e:
+                print(f"download failed: {e}", file=sys.stderr, flush=True)
+                return 1
+    else:
+        # ---- temp-path pipeline (the downloader prints progress to stderr) ----
+        print(f"[1/2] Downloading {url}", file=sys.stderr, flush=True)
+        try:
+            media_path = downloader.download(url)
+        except downloader.DownloadError as e:
+            print(f"download failed: {e}", file=sys.stderr, flush=True)
+            return 1
 
     # ---- 2. AirPlay to the target Apple TV ------------------------------------
     target = device or "the first Apple TV on the network"
@@ -99,7 +127,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--keep", action="store_true",
-        help="Keep the downloaded file after streaming instead of deleting it.",
+        help="Keep the downloaded file after streaming instead of deleting it. "
+              "The file is stored in --save-path "
+              f"(default {_DEFAULT_SAVE_DIR}) instead of a temp dir, and a cached "
+              "copy of the same URL is reused rather than re-downloaded.",
+    )
+    parser.add_argument(
+        "--save-path", default=None, metavar="<dir>",
+        help="Directory --keep downloads into and keeps files in "
+              f"(default: {_DEFAULT_SAVE_DIR}).",
     )
     return parser
 
@@ -107,5 +143,6 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: parse args, run the pipeline, exit on the pipeline code."""
     args = _build_parser().parse_args(argv)
-    code = run(args.url, device=args.device, pin=args.pin, keep=args.keep)
+    code = run(args.url, device=args.device, pin=args.pin,
+               keep=args.keep, save_path=args.save_path)
     raise SystemExit(code)

@@ -145,22 +145,30 @@ airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
             --device "Living Room Apple TV"
 
-# Keep the downloaded file on disk after streaming (otherwise it is deleted):
+# Keep the downloaded file on disk after streaming (otherwise it is deleted).
+# With --keep the file is stored in ~/Videos/airplay-yt instead of a temp dir
+# (override the location with --save-path); re-running the same URL reuses the
+# cached copy instead of downloading it again:
 airplay-yt --url "https://www.youtube.com/watch?v=x" \
             --device "Dining Room Apple TV" \
-            --keep
+            --keep \
+            --save-path "$HOME/Videos/airplay-yt"
 ```
 
 For each play, the program:
 
 1. **Downloads** the URL to a fresh temporary directory, showing YouTube's
-   own progress line (percentage, speed, ETA) as it goes.
+   own progress line (percentage, speed, ETA) as it goes. With `--keep` the
+   file is written to the persistent save directory (default `~/Videos/airplay-yt`,
+   override with `--save-path <dir>`) instead, and if a cached copy of the same
+   URL is already there the download is **skipped** and the existing file is
+   streamed right away.
 2. **Streams** that file to the Apple TV; this call blocks for the full
    duration of the media. Press **Ctrl-C** at any time to stop; the pending
    playback is cancelled and the temporary file is removed.
 3. **Cleans up** by removing the temporary download directory — unless you
-   passed `--keep`, in which case the file is left on disk and its location
-   is printed.
+   passed `--keep`, in which case the file is left on disk in the save
+   directory and its location is printed.
 
 ### Options
 
@@ -169,7 +177,8 @@ For each play, the program:
 | `--url` | — | *required* | The source URL: any link `yt-dlp` understands (YouTube and many other hosts). |
 | `--device`, `-D` | — | auto-pick | Target Apple TV by **name**, **IP address**, or device id. Omit to auto-select when exactly one device is on the network. |
 | `--pin`, `-p` | — | *prompt* | The AirPlay pairing PIN, supplied non-interactively. When omitted, the program prompts for it on first use. |
-| `--keep` | — | *off* | Leave the downloaded file on disk after streaming rather than deleting it. |
+| `--keep` | — | *off* | Leave the downloaded file on disk after streaming rather than deleting it. The file is written to the persistent save directory (default `~/Videos/airplay-yt`; override with `--save-path`) instead of a temp dir, and a cached copy of the same URL is reused on later runs instead of re-downloaded. |
+| `--save-path` | — | `~/Videos/airplay-yt` | Directory that `--keep` downloads into and keeps files in. Ignored unless `--keep` is set. |
 | `-h`, `--help` | — | — | Show the help page. |
 
 ### Lower-level: AirPlay a local file directly
@@ -195,7 +204,7 @@ removed from the active path:
 |---|---|---|
 | `downloader.py` — fetch a URL at the highest Apple-TV-playable quality | ✅ Implemented | `yt-dlp` with a codec cap of `VP9 → H.264 → best combined`, always `AAC` audio, always muxed into `MP4`. No transcode needed. Temp-dir handling, resolution of the produced file, and error wrapping are done. Tested end-to-end with real YouTube and sample URLs. |
 | `airplay.py` — stream a file to an Apple TV | ✅ Implemented | Async wrapper over `pyatv`. Patches in `tvos_patch` for modern tvOS 26/27 receivers (their `GET /info` handshake broke stock `pyatv`, see the module docstring). Credentials are applied from `~/.pyatv.conf` by hand for the same reason. Auto-pairs on first use. |
-| `cli.py` — command line that wires the pipeline | ✅ Implemented | `airplay-yt` console script. Prints a status line per stage, shows the download progress, handles `--device` / `--pin` / `--keep`, and cleans up. Tested via both `uv run airplay-yt` and `python -m airplay_yt`. |
+| `cli.py` — command line that wires the pipeline | ✅ Implemented | `airplay-yt` console script. Prints a status line per stage, shows the download progress, handles `--device` / `--pin` / `--keep` / `--save-path`, and cleans up. Tested via both `uv run airplay-yt` and `python -m airplay_yt`. |
 | `transcoder.py` — hardware-accelerated ffmpeg re-encode | ⚠️ Placeholder | Not on the active path. The download stage already produces a natively-playable rendition, so a re-encode is not needed. The file is a stub that raises `NotImplementedError`. |
 
 A note on the `pyatv` fork: because upstream `pyatv` cannot play video to
