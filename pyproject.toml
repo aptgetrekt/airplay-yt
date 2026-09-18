@@ -4,7 +4,22 @@ version = "0.1.0"
 description = "Download a video from a URL, transcode it for AirPlay with hardware-accelerated ffmpeg, and stream it to an Apple TV"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pyatv>=0.18.0",
+]
+
+# Upstream PyPI pyatv 0.18.0 cannot play video to Apple TV running tvOS 26/27: its
+# AirPlay-v2 player uses the old POST /play handshake, which these receivers reject
+# (the RTSP session activates but media never flows). The fix is the play-queue
+# protocol rewrite in pyatv PR #2899 (mikelambert:airplay-play-queue-fix), which
+# POSTs /command with PTP timing. The git source below pins that fork; a copy under
+# vendor/pyatv is the offline fallback (`uv pip install -e vendor/pyatv` re-points
+# the dev install at it).
+[tool.uv.sources]
+pyatv = {
+       git = "https://github.com/mikelambert/pyatv.git",
+       rev = "b24840990af7ae5505538d36fc42cef7b3cc348e",
+       }
 
 [project.scripts]
 airplay-yt = "airplay_yt.cli:main"
