@@ -78,14 +78,19 @@ def _safe_video_id(url: str) -> str:
 
 
 def _progress_hook(d: dict) -> None:
-    """Log download progress at a coarse, non-spammy cadence."""
+    """Report download progress through the logging layer.
+
+    yt-dlp renders its own live download progress bar, so this hook only records
+    coarse milestones at debug level; it does not print its own progress line.
+    """
     status = d.get("status")
+    fname = os.path.basename(d.get("filename", "") or "?")
     if status == "downloading":
-        log.debug("downloading %s", d.get("filename", "?"))
+        log.debug("downloading %s", fname)
     elif status == "finished":
-        log.debug("downloaded %s", d.get("filename", "?"))
+        log.debug("downloaded %s", fname)
     elif status == "error":
-        log.warning("download error for %s", d.get("filename", "?"))
+        log.warning("download error for %s", fname)
 
 
 def _ensure_ffmpeg() -> None:
@@ -170,6 +175,7 @@ def _download_via_module(url: str, out_dir: str, base: str, opts: dict) -> str:
     try:
         info = ydl.extract_info(url, download=True)
     except Exception as e:  # yt-dlp raises a moving hierarchy; re-wrap all
+        print()                   # clear a leftover progress line first
         raise DownloadError(f"yt-dlp failed to download {url!r}: {e}") from e
     else:
         result_path = _resolve_output(out_dir, base, info)

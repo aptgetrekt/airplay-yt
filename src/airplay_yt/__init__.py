@@ -3,5 +3,7 @@
 __version__ = "0.1.0"
 
 
-def main() -> None:
-    raise NotImplementedError("entry point not wired up yet; see cli")
+def main(argv: list[str] | None = None) -> None:
+    "Entry point: download a URL, then AirPlay it (delegates to the CLI)."
+    from airplay_yt.cli import main as _cli_main
+    _cli_main(argv)
