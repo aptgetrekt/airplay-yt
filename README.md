@@ -1,8 +1,8 @@
 # airplay-yt
 
-Take a video URL (such as a YouTube link), pull it down in the highest
-quality **an Apple TV can play natively**, and stream it to an Apple TV on your
-local network over AirPlay.
+Take a video URL (such as a YouTube link) or a local file, pull it down in the
+highest quality **an Apple TV can play natively** (URL case only), and stream it
+to an Apple TV on your local network over AirPlay.
 
 The key choice in this project is that the download step already selects a
 codec the Apple TV decodes in hardware — **VP9 video with a fallback to
@@ -20,12 +20,16 @@ a 4K VP9 + AAC file this way plays at full quality.
   (YouTube, etc.) (highest VP9/   (serve the file to
                     H.264 + AAC,   an Apple TV over
                      MP4, muxed)   AirPlay)
+
+   local file   ──────────────────────►  airplay
+  (--file <path>)   (download skipped)
 ```
 
 1. **Download** — fetch the source URL with `yt-dlp` and choose the
    highest-quality rendition the Apple TV decodes natively (VP9 → H.264 → best
    available combined stream), muxing separate video and audio into a single
-   MP4.
+   MP4. With `--file` this stage is skipped entirely and a local path is used
+   as-is.
 2. **AirPlay** — hand that file to the target Apple TV for playback via
    `pyatv`. The library serves the file itself, so no media server is needed.
 
@@ -174,12 +178,32 @@ For each play, the program:
 
 | Flag | Aliases | Default | Description |
 |---|---|---|---|
-| `--url` | — | *required* | The source URL: any link `yt-dlp` understands (YouTube and many other hosts). |
+| `--url` | — | *required unless `--file`* | The source URL: any link `yt-dlp` understands (YouTube and many other hosts). Not needed when `--file` is given. |
+| `--file` | `-f` | — | Path to an existing local media file. Streams that file directly and **skips the download step**; `--url` is then unnecessary. The file is left on disk afterwards (`--keep` / `--save-path` are ignored). |
 | `--device`, `-D` | — | auto-pick | Target Apple TV by **name**, **IP address**, or device id. Omit to auto-select when exactly one device is on the network. |
 | `--pin`, `-p` | — | *prompt* | The AirPlay pairing PIN, supplied non-interactively. When omitted, the program prompts for it on first use. |
-| `--keep` | — | *off* | Leave the downloaded file on disk after streaming rather than deleting it. The file is written to the persistent save directory (default `~/Videos/airplay-yt`; override with `--save-path`) instead of a temp dir, and a cached copy of the same URL is reused on later runs instead of re-downloaded. |
+| `--keep` | — | *off* | Leave the downloaded file on disk after streaming rather than deleting it. The file is written to the persistent save directory (default `~/Videos/airplay-yt`; override with `--save-path`) instead of a temp dir, and a cached copy of the same URL is reused on later runs instead of re-downloaded. Ignored with `--file`. |
 | `--save-path` | — | `~/Videos/airplay-yt` | Directory that `--keep` downloads into and keeps files in. Ignored unless `--keep` is set. |
 | `-h`, `--help` | — | — | Show the help page. |
+
+### 3. Play a local file (skip the download)
+
+If you already have a file on disk — including one saved earlier with `--keep` —
+stream it directly with `--file`. No download runs, so `--url` is not needed:
+
+```bash
+airplay-yt --file ~/Videos/airplay-yt/dQw4w9WgXcQ.mp4 \
+            --device "Living Room Apple TV"
+
+# Auto-pick the only Apple TV on the network, no URL:
+airplay-yt --file ./some-video.mp4
+```
+
+The file is used exactly as given: nothing is copied, downloaded, or deleted.
+A missing path is reported before any AirPlay connection is attempted. Pairing
+works the same as above, so `--pin` applies here too. The file must already be
+in a format the Apple TV plays natively (VP9/H.264 + AAC in MP4) — `--file`
+performs no transcoding.
 
 ### Lower-level: AirPlay a local file directly
 
@@ -204,7 +228,7 @@ removed from the active path:
 |---|---|---|
 | `downloader.py` — fetch a URL at the highest Apple-TV-playable quality | ✅ Implemented | `yt-dlp` with a codec cap of `VP9 → H.264 → best combined`, always `AAC` audio, always muxed into `MP4`. No transcode needed. Temp-dir handling, resolution of the produced file, and error wrapping are done. Tested end-to-end with real YouTube and sample URLs. |
 | `airplay.py` — stream a file to an Apple TV | ✅ Implemented | Async wrapper over `pyatv`. Patches in `tvos_patch` for modern tvOS 26/27 receivers (their `GET /info` handshake broke stock `pyatv`, see the module docstring). Credentials are applied from `~/.pyatv.conf` by hand for the same reason. Auto-pairs on first use. |
-| `cli.py` — command line that wires the pipeline | ✅ Implemented | `airplay-yt` console script. Prints a status line per stage, shows the download progress, handles `--device` / `--pin` / `--keep` / `--save-path`, and cleans up. Tested via both `uv run airplay-yt` and `python -m airplay_yt`. |
+| `cli.py` — command line that wires the pipeline | ✅ Implemented | `airplay-yt` console script. Prints a status line per stage, shows the download progress, handles `--device` / `--pin` / `--keep` / `--save-path` / `--file`, and cleans up. `--file` bypasses the download and streams a local path directly; one of `--url` or `--file` is required. Tested via both `uv run airplay-yt` and `python -m airplay_yt`. |
 | `transcoder.py` — hardware-accelerated ffmpeg re-encode | ⚠️ Placeholder | Not on the active path. The download stage already produces a natively-playable rendition, so a re-encode is not needed. The file is a stub that raises `NotImplementedError`. |
 
 A note on the `pyatv` fork: because upstream `pyatv` cannot play video to
@@ -220,7 +244,7 @@ resolves that pin transparently — you do not need to install `pyatv` yourself.
 src/airplay_yt/
 ├── __init__.py       # package metadata + `main()` delegating to the CLI
 ├── __main__.py       # `python -m airplay_yt` entry point
-├── cli.py            # console script: download -> airplay, with a single progress bar
+├── cli.py            # console script: download (or --file) -> airplay
 ├── downloader.py     # fetch a URL in the highest Apple-TV-playable quality (yt-dlp)
 ├── airplay.py        # stream that file to an Apple TV over AirPlay (pyatv)
 ├── tvos_patch.py     # monkey-patch applied for modern tvOS 26/27 receivers
