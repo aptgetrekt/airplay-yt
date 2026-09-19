@@ -69,7 +69,7 @@ uv sync
 
 `uv sync` installs **stock `pyatv` from PyPI**. Released `pyatv` cannot play video
 to Apple TVs running tvOS 26/27, so the play-queue protocol fix is applied at
-runtime by `src/airplay_yt/play_queue_patch.py` instead of by pinning a fork. `uv
+runtime by `src/airplay_yt/monkey_patches/play_queue_patch.py` instead of by pinning a fork. `uv
 sync` (and `uv run`) set everything up; there is no submodule to initialize and
 no git dependency to fetch.
 
@@ -235,10 +235,11 @@ Stock PyPI `pyatv 0.18.0` cannot play video to Apple TVs running tvOS 26/27, so
 this project carries the fixes as two runtime monkey-patches rather than a forked
 dependency:
 
-- `play_queue_patch.py` — the play-queue protocol rewrite from upstream PR
-  #2774 / #2899 (video is driven through `POST /command`, not the legacy
-  `POST /play` that these receivers reject).
-- `tvos_patch.py` — the `psi` injection those receivers additionally need.
+- `monkey_patches/play_queue_patch.py` — the play-queue protocol rewrite from
+  upstream PR #2774 / #2899 (video is driven through `POST /command`, not the
+  legacy `POST /play` that these receivers reject).
+- `monkey_patches/tvos_patch.py` — the `psi` injection those receivers
+  additionally need.
 
 Both apply automatically on every stream. `pyproject.toml` depends only on the
 published `pyatv` package, so `uv sync` needs no `[tool.uv.sources]` override, no
@@ -257,9 +258,10 @@ On every pyatv upgrade:
 1. **Decide whether the patches are still needed at all.** Check whether the
    play-queue fix (upstream PR #2774 / #2899) and the psi fix have shipped in the
    new release. If they have, **delete the corresponding patch module**
-   (`play_queue_patch.py` / `tvos_patch.py`) and remove its `apply()` call from
-   `airplay.py` and its mention in `pyproject.toml`. Leaving a patch in place for
-   a fix that already exists is a bug.
+   (`monkey_patches/play_queue_patch.py` / `monkey_patches/tvos_patch.py`) and
+   remove its `apply()` call from `airplay.py` and its mention in
+   `pyproject.toml`. Leaving a patch in place for a fix that already exists is a
+   bug.
 2. **If a patch is still needed, re-verify it against the new pyatv.** Each module
    docstring lists the exact modules, method names, signatures, and class
    attributes it touches. Diff those against the installed pyatv and update the
@@ -272,12 +274,12 @@ Both `apply()` functions return `False` and log the reason when they cannot patc
 rather than raising, and `airplay.py` logs a warning for each inactive patch. After
 an upgrade, read those warnings — silence there is not proof of success.
 
-The guards are partly automatic. `_pyatv_guard.py` holds the expected pyatv
-version (`EXPECTED_PYATV_VERSION`, which must match the pin in `pyproject.toml`);
-a mismatch logs a warning, and each patch **skips itself when the installed pyatv
-already provides the fix it would apply**, saying so in the log. Neither check
-blocks a run, so they are a prompt to re-verify — step 3 above is still the real
-test.
+The guards are partly automatic. `monkey_patches/_pyatv_guard.py` holds the
+expected pyatv version (`EXPECTED_PYATV_VERSION`, which must match the pin in
+`pyproject.toml`); a mismatch logs a warning, and each patch **skips itself when
+the installed pyatv already provides the fix it would apply**, saying so in the
+log. Neither check blocks a run, so they are a prompt to re-verify — step 3 above
+is still the real test.
 
 ---
 
@@ -290,9 +292,10 @@ src/airplay_yt/
 ├── cli.py            # console script: download (or --file) -> airplay
 ├── downloader.py     # fetch a URL in the highest Apple-TV-playable quality (yt-dlp)
 ├── airplay.py        # stream that file to an Apple TV over AirPlay (pyatv)
-├── _pyatv_guard.py  # version check + upstream-fix detection for the patches
-├── play_queue_patch.py  # runtime play-queue protocol fix for tvOS 26/27
-├── tvos_patch.py     # runtime psi-injection fix for tvOS 26/27 receivers
+├── monkey_patches/   # runtime pyatv patches for tvOS 26/27 (see Status)
+│   ├── _pyatv_guard.py       # version check + upstream-fix detection
+│   ├── play_queue_patch.py   # play-queue protocol fix (POST /command)
+│   └── tvos_patch.py         # psi injection for the remote control session
 └── transcoder.py     # unused placeholder: hardware-accelerated re-encode (see Status)
 ```
 

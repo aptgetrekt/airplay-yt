@@ -7,10 +7,10 @@ server on the device's behalf -- so no external media server is needed here.
 Modern receivers (Apple TV 4K on tvOS 26.x / 27.x) broke the stock pyatv stream
 path in two ways. PyPI pyatv 0.18.0 still starts video with the legacy
 ``POST /play`` handshake instead of the play queue on ``POST /command``, so no
-media is delivered (module :mod:`airplay_yt.play_queue_patch`); and the receiver
+media is delivered (module :mod:`airplay_yt.monkey_patches.play_queue_patch`); and the receiver
 no longer answers ``GET /info``, so the Apple psi needed to register the "remote
 control session" that carries that play queue is unknown (module
-:mod:`airplay_yt.tvos_patch`). :func:`stream` applies both patches automatically
+:mod:`airplay_yt.monkey_patches.tvos_patch`). :func:`stream` applies both patches automatically
 before connecting, so no forked pyatv install is needed.
 
 Both patch modules reach into pyatv internals and are pinned to ``pyatv 0.18.0``
@@ -41,7 +41,7 @@ import pyatv.exceptions
 from pyatv import const
 from pyatv.const import Protocol
 
-from . import play_queue_patch, tvos_patch
+from .monkey_patches import play_queue_patch, tvos_patch
 
 _LOGGER = logging.getLogger(__name__)
 

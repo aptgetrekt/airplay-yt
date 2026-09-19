@@ -9,10 +9,10 @@ TL;DR:
 1. The actual streaming fix is **not our code**. It is an open, unreleased fix to
    `pyatv` (the `POST /command` *play-queue* protocol rewrite, upstream PR
    **#2774 / #2899**). It used to be linked as a git submodule at `vendor/pyatv/`;
-   it is now **applied at runtime** by `src/airplay_yt/play_queue_patch.py` on top
+   it is now **applied at runtime** by `src/airplay_yt/monkey_patches/play_queue_patch.py` on top
    of stock `pyatv 0.18.0` from PyPI, so no fork or submodule is needed.
 2. A **small additional runtime monkey-patch** in our project —
-   `src/airplay_yt/tvos_patch.py` — plugs the one remaining gap on tvOS 26.6/27:
+   `src/airplay_yt/monkey_patches/tvos_patch.py` — plugs the one remaining gap on tvOS 26.6/27:
    injecting the Apple `psi` that the modern receiver no longer hands back.
 3. `airplay.py` wires the two together, loads stored credentials by hand, and
    calls `atv.stream.play_url(...)`, letting `pyatv` stand up a short-lived HTTP
@@ -52,7 +52,7 @@ delivered. The correct protocol was written in an upstream pull request that is
   tvOS 26") / **#2899** ("Fix AirPlay to modern Apple TV tvOS").
 
 This is the bulk of the work, and **we did not write it** — it is now carried as
-runtime monkey-patch code in `src/airplay_yt/play_queue_patch.py` (see
+runtime monkey-patch code in `src/airplay_yt/monkey_patches/play_queue_patch.py` (see
 *How the fix is carried now* below).
 
 ### 2. The `psi` on tvOS 26.6/27 (our gap)
@@ -77,14 +77,14 @@ companion 1E5EC627-380B-4157-8D56-CB6656A4B407   <-- this is the psi
 raop      1E5EC627380B
 ```
 
-So `tvos_patch.py` supplies the missing `psi` from the companion identifier
+So `monkey_patches/tvos_patch.py` supplies the missing `psi` from the companion identifier
 instead of waiting for `GET /info` to provide it.
 
 ---
 
 ## The fix
 
-### `src/airplay_yt/tvos_patch.py` (our contribution)
+### `src/airplay_yt/monkey_patches/tvos_patch.py` (our contribution)
 
 A runtime monkey-patch, applied idempotently via `tvos_patch.apply()` at the start
 of the connect path (`airplay.py`, `_connect`). Two changes:
@@ -145,7 +145,7 @@ That commit folds in the upstream play-queue fix (PRs **#2774** and **#2899**).
 
 ### How it is applied
 
-`src/airplay_yt/play_queue_patch.py` applies that change at runtime, on top of
+`src/airplay_yt/monkey_patches/play_queue_patch.py` applies that change at runtime, on top of
 whatever stock `pyatv` is installed, so the project depends only on the published
 PyPI package. It patches four modules:
 
@@ -156,7 +156,7 @@ PyPI package. It patches four modules:
 | `pyatv.protocols.raop.protocols.airplayv2` | PTP video session, remote control session, play-queue `POST /command` commands, event-driven end of media |
 | `pyatv.protocols.airplay.player` | Stop polling `GET /playback-info` when the protocol reports media end itself |
 
-`tvos_patch.py` then layers `psi` injection on top, because the play-queue path
+`monkey_patches/tvos_patch.py` then layers `psi` injection on top, because the play-queue path
 needs a remote control session that the tvOS 26.6/27 `GET /info` failure would
 otherwise block.
 
@@ -175,8 +175,8 @@ otherwise block.
   contains the fix.
 
 Recommended path forward (once the PR merges upstream): delete
-`play_queue_patch.py` and `tvos_patch.py`, and depend on the released `pyatv`
-that contains both fixes.
+`monkey_patches/play_queue_patch.py` and `monkey_patches/tvos_patch.py`, and depend
+on the released `pyatv` that contains both fixes.
 
 ### ⚠️ On every pyatv version change
 
@@ -186,8 +186,9 @@ the release they were written for (`0.18.0`). `pyproject.toml` pins
 
 1. Check whether the play-queue fix (PRs #2774 / #2899) and the psi fix are now
    in the released pyatv. If so, delete the corresponding patch module
-   (`play_queue_patch.py` / `tvos_patch.py`) and its `apply()` call in
-   `airplay.py` — do not keep patching a fix that already exists.
+   (`monkey_patches/play_queue_patch.py` / `monkey_patches/tvos_patch.py`) and its
+   `apply()` call in `airplay.py` — do not keep patching a fix that already
+   exists.
 2. If a patch is still needed, re-verify it: each module docstring lists every
    pyatv module, method, signature, and attribute it touches. Update the patch
    for anything that moved or was renamed.
@@ -199,7 +200,7 @@ the release they were written for (`0.18.0`). `pyproject.toml` pins
 `airplay.py` logs a warning per inactive patch, so check the logs after an
 upgrade.
 
-Part of this is automatic: `_pyatv_guard.py` records the expected pyatv version
+Part of this is automatic: `monkey_patches/_pyatv_guard.py` records the expected pyatv version
 (must match the `pyatv==` pin in `pyproject.toml`) and warns on a mismatch, and
 each patch skips itself, with a log line, when the installed pyatv already
 provides the fix it would apply.

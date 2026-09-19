@@ -1,7 +1,7 @@
 """Version and ownership guards shared by the pyatv runtime patches.
 
-Both patches in this package (:mod:`airplay_yt.play_queue_patch` and
-:mod:`airplay_yt.tvos_patch`) reach into pyatv internals, so each is written
+Both patches in this package (:mod:`airplay_yt.monkey_patches.play_queue_patch` and
+:mod:`airplay_yt.monkey_patches.tvos_patch`) reach into pyatv internals, so each is written
 against one specific pyatv release. Two things can go wrong on an upgrade:
 
 * the patch no longer applies because the internals it touches moved, or

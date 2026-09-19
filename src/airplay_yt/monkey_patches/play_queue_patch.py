@@ -39,7 +39,7 @@ Four modules differ between stock ``pyatv 0.18.0`` and the fork:
     itself.
 
 Apply it via :func:`apply` (idempotent) before connecting. :mod:`airplay_yt.airplay`
-does this automatically, and :mod:`airplay_yt.tvos_patch` then layers on the one
+does this automatically, and :mod:`airplay_yt.monkey_patches.tvos_patch` then layers on the one
 gap the fork leaves open (the ``psi`` a tvOS 26.6/27 receiver no longer reports).
 
 The patched code is a faithful copy of the upstream pull request; it is kept
@@ -68,7 +68,7 @@ upgrade:
 than raising, so after an upgrade check the logs instead of assuming silence
 means success.
 
-Some of this is checked automatically at runtime by :mod:`airplay_yt._pyatv_guard`:
+Some of this is checked automatically at runtime by :mod:`airplay_yt.monkey_patches._pyatv_guard`:
 the installed pyatv version is compared against the expected one (a mismatch logs
 a warning), and :func:`already_fixed_upstream` detects a pyatv that already ships
 the play-queue protocol, in which case this module skips patching and says so.

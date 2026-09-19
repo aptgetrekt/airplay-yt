@@ -8,16 +8,18 @@ requires-python = ">=3.13"
 # player uses the old POST /play handshake, which those receivers reject (the RTSP
 # session activates but media never flows). Rather than pin an unreleased fork as
 # a git dependency, the play-queue protocol rewrite from upstream PR #2774/#2899
-# is applied at runtime by airplay_yt.play_queue_patch, so the published package
-# is the only pyatv this project installs. airplay_yt.tvos_patch then adds the psi
-# injection those receivers additionally need.
+# is applied at runtime by airplay_yt.monkey_patches.play_queue_patch, so the
+# published package is the only pyatv this project installs.
+# airplay_yt.monkey_patches.tvos_patch then adds the psi injection those receivers
+# additionally need.
 #
 # MAINTENANCE -- READ BEFORE CHANGING THE pyatv VERSION:
 # These patches reach into pyatv internals, so they are pinned to the shape of the
 # pyatv release they were written against (0.18.0). Whenever `pyatv` is upgraded:
 #   1. Check whether the play-queue fix (PR #2774 / #2899) and the psi fix have
 #      been released upstream. If so, delete the corresponding patch module
-#      (play_queue_patch.py / tvos_patch.py) and remove the note here.
+#      (play_queue_patch.py / tvos_patch.py) and remove the note here and the
+#      reference in README.md / AIRPLAY.md.
 #   2. If a patch is still needed, diff it against the new pyatv: the patched
 #      modules, method names, signatures, and class attributes may have moved or
 #      been renamed. Update the patch until it applies cleanly (see the module
@@ -27,11 +29,11 @@ requires-python = ">=3.13"
 #      legacy POST /play path and plays no video at all.
 # Patches that no longer apply log an error and report False rather than raising,
 # so check the logs after an upgrade instead of assuming silence means success.
-# Some of this is automatic: airplay_yt._pyatv_guard compares the installed pyatv
-# against EXPECTED_PYATV_VERSION (which must match the pin below) and warns on a
-# mismatch, and each patch skips itself when the installed pyatv already provides
-# the fix it would apply. Keep EXPECTED_PYATV_VERSION in _pyatv_guard.py and the
-# pyatv pin below in step with each other.
+# Some of this is automatic: airplay_yt.monkey_patches._pyatv_guard compares the
+# installed pyatv against EXPECTED_PYATV_VERSION (which must match the pin below)
+# and warns on a mismatch, and each patch skips itself when the installed pyatv
+# already provides the fix it would apply. Keep EXPECTED_PYATV_VERSION in
+# monkey_patches/_pyatv_guard.py and the pyatv pin below in step with each other.
 dependencies = [
     "pyatv==0.18.0",
     "yt-dlp>=2026.08.19",

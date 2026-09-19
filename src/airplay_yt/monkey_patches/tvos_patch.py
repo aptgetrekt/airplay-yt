@@ -25,7 +25,7 @@ via :func:`apply` (idempotent) before connecting.
 MAINTENANCE -- READ BEFORE CHANGING THE pyatv VERSION
 ----------------------------------------------------
 This patch is pinned to the shape of ``pyatv 0.18.0`` (see the pin in
-``pyproject.toml``) and depends on :mod:`airplay_yt.play_queue_patch` being
+``pyproject.toml``) and depends on :mod:`airplay_yt.monkey_patches.play_queue_patch` being
 applied first, because that module owns ``RCS_CLIENT_TYPE_UUID`` and
 ``_setup_remote_control_session``, which this one layers on. On every pyatv
 upgrade:
@@ -46,7 +46,7 @@ upgrade:
 :func:`apply` returns ``False`` (and logs why) when the pyatv pieces it needs are
 absent, so check its return value or the logs after an upgrade.
 
-Some of this is checked automatically at runtime by :mod:`airplay_yt._pyatv_guard`:
+Some of this is checked automatically at runtime by :mod:`airplay_yt.monkey_patches._pyatv_guard`:
 the installed pyatv version is compared against the expected one (a mismatch logs
 a warning), and :func:`already_handled_upstream` detects a pyatv that injects the
 psi itself, in which case this module skips patching and says so. That detection
@@ -109,7 +109,7 @@ def already_handled_upstream() -> bool:
 def apply() -> bool:
     """Apply the patch idempotently. Returns True if the psi fix is in effect.
 
-    :mod:`airplay_yt.play_queue_patch` supplies the play-queue implementation this
+    :mod:`airplay_yt.monkey_patches.play_queue_patch` supplies the play-queue implementation this
     patch layers on (it owns ``RCS_CLIENT_TYPE_UUID`` and
     ``_setup_remote_control_session``), so it must be applied first.
 
