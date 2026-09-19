@@ -2,8 +2,10 @@
 
 Usage:
     airplay-yt --url <source-url> [--device "<Apple TV name or IP>"] [--pin N]
+    airplay-yt --file <path> [--device "<Apple TV name or IP>"] [--pin N]
 
-The URL is handed to :mod:`airplay_yt.downloader`, which downloads the
+With ``--file`` an existing local media file is streamed and no download runs.
+Otherwise the URL is handed to :mod:`airplay_yt.downloader`, which downloads the
 highest-quality Apple-TV-playable rendition (VP9 with H.264 fallback, AAC audio,
 mp4 container) into a fresh temp directory and returns its path. That path is then
 handed to :mod:`airplay_yt.airplay`, which serves it to the target Apple TV over
@@ -41,21 +43,30 @@ def _cleanup(media_path: str, keep: bool) -> None:
         print(f"kept {media_path}", file=sys.stderr, flush=True)
 
 
-def run(url: str, device: str | None = None, pin: str | None = None,
-        keep: bool = False, save_path: str | None = None) -> int:
-    """Download ``url`` then AirPlay it to the selected Apple TV.
+def run(url: str | None = None, device: str | None = None,
+        pin: str | None = None, keep: bool = False,
+        save_path: str | None = None, file: str | None = None) -> int:
+    """Obtain a local media file, then AirPlay it to the selected Apple TV.
 
-    With ``keep`` the download is written to a persistent directory
-    (``save_path``, defaulting to :data:`_DEFAULT_SAVE_DIR`) instead of a
-    throwaway temp dir; if a cached copy of the same URL is already there the
-    download is skipped and the existing file is streamed straight away.
+    When ``file`` is given the download step is skipped entirely and that local
+    path is streamed as-is. Otherwise ``url`` is downloaded (to a persistent
+    directory when ``keep`` is set -- ``save_path``, defaulting to
+    :data:`_DEFAULT_SAVE_DIR`; a cached copy of the same URL is reused rather
+    than re-downloaded).
 
     Returns a process exit code: 0 on success, 130 on user interrupt, 1 on any
     failure. Status is written to stderr so stdout stays pipe-friendly.
     """
     # ---- 1. obtain a local media file --------------------------------------
     media_path: str
-    if keep:
+    if file is not None:
+        media_path = os.path.abspath(os.path.expanduser(file))
+        if not os.path.isfile(media_path):
+            print(f"file not found: {media_path}", file=sys.stderr, flush=True)
+            return 1
+        print(f"[1/2] Using local file {media_path} (skipping download)",
+              file=sys.stderr, flush=True)
+    elif keep:
         out_dir = os.path.abspath(os.path.expanduser(save_path or _DEFAULT_SAVE_DIR))
         os.makedirs(out_dir, exist_ok=True)
         existing = downloader.find_existing(url, out_dir)
@@ -113,8 +124,14 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--url", required=True, metavar="<source-url>",
-        help="Video source URL (YouTube, or anything yt-dlp understands).",
+        "--url", default=None, metavar="<source-url>",
+        help="Video source URL (YouTube, or anything yt-dlp understands). "
+             "Required unless --file is given.",
+    )
+    parser.add_argument(
+        "--file", "-f", default=None, metavar="<path>",
+        help="Stream an existing local media file instead of downloading. "
+             "Skips the download step; --url is then unnecessary.",
     )
     parser.add_argument(
         "--device", "-D", default=None, metavar="<name/IP>",
@@ -142,7 +159,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: parse args, run the pipeline, exit on the pipeline code."""
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.file is None and args.url is None:
+        parser.error("one of --url or --file is required")
     code = run(args.url, device=args.device, pin=args.pin,
-               keep=args.keep, save_path=args.save_path)
+               keep=args.keep, save_path=args.save_path, file=args.file)
     raise SystemExit(code)
