@@ -138,10 +138,14 @@ def _ensure_ffmpeg() -> None:
             "merged into one file, and the result may not be AirPlay-playable.")
 
 
-def _build_opts(out_dir: str) -> dict:
+def _build_opts(out_dir: str, base: str) -> dict:
     """Build yt-dlp options that select the best Apple-TV-playable rendition and
-    write a single merged MP4 into ``out_dir`` (see the codec-cap constants above)."""
-    base = _safe_video_id(url)
+    write a single merged MP4 named ``base`` into ``out_dir`` (see the codec-cap
+    constants above).
+
+    ``base`` is passed in rather than derived here so every caller shares the one
+    :func:`_safe_video_id` result, including the cache lookup.
+    """
     return {
         "outtmpl": os.path.join(out_dir, f"{base}.%(ext)s"),
         "merge_output_format": MERGE_FORMAT,
@@ -299,7 +303,7 @@ def download(url: str, dest_dir: str | None = None) -> str:
     out_dir = os.path.abspath(dest_dir or tempfile.mkdtemp(prefix="airplay-yt-"))
     os.makedirs(out_dir, exist_ok=True)
     base = _safe_video_id(url)
-    opts = _build_opts(out_dir)
+    opts = _build_opts(out_dir, base)
 
     if _module_available("yt_dlp"):
         return _download_via_module(url, out_dir, base, opts)
