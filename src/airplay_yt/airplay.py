@@ -1,4 +1,4 @@
-"""Stream a locally transcoded media file to an Apple TV over AirPlay.
+"""Stream a local media file to an Apple TV over AirPlay.
 
 Uses the async `pyatv` library. The local file is handed to the Apple TV via
 `AppleTV.stream.play_url()`, which serves the file over a short-lived HTTP
@@ -117,7 +117,7 @@ async def _pair(config, loop, storage, pin=None):
     """Interactively pair `config`. Prompts for the PIN shown on the TV.
 
     Credentials are written to `storage`, so pairing only happens on the first
-    run for a given device. Returns `True` when pairing succeeds.
+    run for a given device.
     """
     handler = await pyatv.pair(
         config, protocol=PROTOCOL, loop=loop, storage=storage
@@ -130,7 +130,6 @@ async def _pair(config, loop, storage, pin=None):
     await handler.pin(entered)
     await handler.finish()
     handler.close()
-    return True
 
 
 async def _connect(config, loop, storage, pin=None):
@@ -141,10 +140,9 @@ async def _connect(config, loop, storage, pin=None):
     try:
         return await pyatv.connect(config, loop=loop, storage=storage)
     except pyatv.exceptions.NoCredentialsError:
-         # No stored credentials for this device yet: pair (which writes the
+        # No stored credentials for this device yet: pair (which writes the
         # credentials to `storage`), then connect again.
-        if not await _pair(config, loop, storage, pin):
-            raise AirPlayError(f"pairing failed for {config.name}")
+        await _pair(config, loop, storage, pin)
         return await pyatv.connect(config, loop=loop, storage=storage)
 
 
@@ -187,15 +185,19 @@ async def _stream(media_path, target=None, pin=None, storage_file=STORAGE_FILE):
             try:
                 # bound each task so a stuck teardown task (e.g. a companion
                 # channel that never closes cleanly) can't hang the caller
-                 await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
             except asyncio.TimeoutError:
-                 task.cancel()
+                task.cancel()
             except Exception:   # pragma: no cover - best-effort cleanup
                 pass
 
 
 def stream(media_path, target=None, pin=None):
-    """AirPlay a local, already-transcoded `media_path` to an Apple TV.
+    """AirPlay a local ``media_path`` to an Apple TV.
+
+    The file is served as-is; no transcoding happens here, so it must already be
+    in a format the receiver plays natively (VP9 or H.264 video with AAC audio
+    in an MP4 container).
 
     Blocking. Wraps the async core in `asyncio.run` and blocks for the full
     duration of the media.

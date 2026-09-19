@@ -1,7 +1,7 @@
 [project]
 name = "airplay-yt"
 version = "0.1.0"
-description = "Download a video from a URL, transcode it for AirPlay with hardware-accelerated ffmpeg, and stream it to an Apple TV"
+description = "Download a video from a URL (or play a local file) and stream it to an Apple TV over AirPlay"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

@@ -32,8 +32,15 @@ _TEMP_PREFIX = "airplay-yt-"
 _DEFAULT_SAVE_DIR = "~/Videos/airplay-yt"
 
 
-def _cleanup(media_path: str, keep: bool) -> None:
-    """Remove the temp download dir created for media_path unless keep is set."""
+def _cleanup(media_path: str, keep: bool, downloaded: bool = True) -> None:
+    """Remove the temp download dir created for media_path unless keep is set.
+
+    Only files this run downloaded are ever removed: a user-supplied ``--file``
+    path (``downloaded=False``) is never touched, even when it happens to sit in
+    a directory named like a temp dir.
+    """
+    if not downloaded:
+        return
     parent = os.path.dirname(media_path)
     if not keep and os.path.basename(parent).startswith(_TEMP_PREFIX):
         shutil.rmtree(parent, ignore_errors=True)
@@ -92,6 +99,9 @@ def run(url: str | None = None, device: str | None = None,
             return 1
 
     # ---- 2. AirPlay to the target Apple TV ------------------------------------
+    # A --file path belongs to the user, so it is never removed or reported as
+    # "kept"; only a download this run produced is cleaned up.
+    downloaded = file is None
     target = device or "the first Apple TV on the network"
     print(f"[2/2] Streaming {os.path.basename(media_path)} to {target} ...",
           file=sys.stderr, flush=True)
@@ -99,15 +109,15 @@ def run(url: str | None = None, device: str | None = None,
         airplay.stream(media_path, target=device, pin=pin)
     except airplay.AirPlayError as e:
         print(f"airplay failed: {e}", file=sys.stderr, flush=True)
-        _cleanup(media_path, keep)
+        _cleanup(media_path, keep, downloaded)
         return 1
     except KeyboardInterrupt:
         print("\ninterrupted by user; stopping", file=sys.stderr, flush=True)
-        _cleanup(media_path, keep)
+        _cleanup(media_path, keep, downloaded)
         return 130
 
     print("done", file=sys.stderr, flush=True)
-    _cleanup(media_path, keep)
+    _cleanup(media_path, keep, downloaded)
     return 0
 
 

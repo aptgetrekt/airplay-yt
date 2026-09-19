@@ -1,4 +1,4 @@
-"""airplay-yt: download a video URL, transcode for AirPlay, and stream it to an Apple TV."""
+"""airplay-yt: download a video URL (or use a local file), then stream it to an Apple TV."""
 
 __version__ = "0.1.0"
 

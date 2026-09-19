@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from urllib.parse import parse_qs, urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -72,9 +73,45 @@ class DownloadError(RuntimeError):
 
 
 def _safe_video_id(url: str) -> str:
-    """Derive a filesystem-safe, extension-free stem from ``url``."""
-    stem = os.path.basename(url.rstrip("/") or "").replace("?", "_").replace("&", "_")
-    return os.path.splitext(stem)[0] or "video"
+    """Derive a filesystem-safe, extension-free stem from ``url``.
+
+    YouTube URLs are canonicalized to their video id first, so the many spellings
+    of one video (``watch?v=ID``, ``youtu.be/ID``, and any extra query such as
+    ``&t=5``) share a single cache entry instead of each downloading again.
+    Other URLs fall back to their basename with unsafe characters stripped; the
+    query is dropped, so all variants of one path share a cache entry too.
+    """
+    video_id = _youtube_video_id(url)
+    if video_id:
+        return video_id
+    path_part = os.path.basename(url.rstrip("/") or "")
+    stem = os.path.splitext(path_part)[0] if "." in path_part else path_part
+    stem = "".join(ch if (ch.isalnum() or ch in "-_.") else "_" for ch in stem)
+    return stem.strip("_.") or "video"
+
+
+def _youtube_video_id(url: str) -> str | None:
+    """Return the canonical YouTube video id in ``url``, or ``None``."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "youtu.be":
+        candidate = parsed.path.lstrip("/")
+    elif host in {"youtube.com", "m.youtube.com", "music.youtube.com"}:
+        if parsed.path == "/watch":
+            candidate = parse_qs(parsed.query).get("v", [""])[0]
+        else:
+            parts = [p for p in parsed.path.split("/") if p]
+            # /shorts/ID, /embed/ID, /live/ID, and /v/ID share the same id space.
+            candidate = parts[1] if len(parts) >= 2 and parts[0] in {
+                "shorts", "embed", "live", "v"} else ""
+    else:
+        return None
+    return "".join(ch for ch in candidate if ch.isalnum() or ch in "-_") or None
 
 
 def _progress_hook(d: dict) -> None:
@@ -98,10 +135,10 @@ def _ensure_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None:
         log.warning(
             "ffmpeg not found on PATH; separate video+audio streams cannot be "
-            "merged into one file, and the result may not be transcode-ready.")
+            "merged into one file, and the result may not be AirPlay-playable.")
 
 
-def _build_opts(url: str, out_dir: str) -> dict:
+def _build_opts(out_dir: str) -> dict:
     """Build yt-dlp options that select the best Apple-TV-playable rendition and
     write a single merged MP4 into ``out_dir`` (see the codec-cap constants above)."""
     base = _safe_video_id(url)
@@ -128,7 +165,7 @@ def _build_opts(url: str, out_dir: str) -> dict:
     }
 
 
-def _resolve_output(out_dir: str, base: str, info: dict | None) -> str:
+def _resolve_output(out_dir: str, base: str) -> str:
     """Return the single merged media file yt-dlp produced, or raise."""
     preferred = os.path.join(out_dir, f"{base}.{MERGE_FORMAT}")
     if os.path.isfile(preferred):
@@ -143,6 +180,16 @@ def _resolve_output(out_dir: str, base: str, info: dict | None) -> str:
     return max(candidates, key=os.path.getmtime)
 
 
+def _legacy_video_id(url: str) -> str:
+    """Return the stem used before YouTube-URL canonicalization, for cache lookups.
+
+    Kept so files downloaded by an older version (named ``watch_v=ID.mp4``) are
+    still recognized as cached copies instead of being downloaded again.
+    """
+    stem = os.path.basename(url.rstrip("/") or "").replace("?", "_").replace("&", "_")
+    return os.path.splitext(stem)[0] or "video"
+
+
 def find_existing(url: str, dest_dir: str) -> str | None:
     """Return a cached media file for ``url`` in ``dest_dir``, or ``None``.
 
@@ -151,24 +198,32 @@ def find_existing(url: str, dest_dir: str) -> str | None:
     reuse the same matching order: the ``base.mp4`` that ``merge_output_format``
     yields first, then any other ``base.*`` media file (newest wins). Incomplete
     ``.ytdl``/``.part`` leftovers from an interrupted download are ignored.
+
+    The pre-canonicalization stem is also checked, so downloads named by an older
+    version of this tool stay recognized.
     """
-    base = _safe_video_id(url)
-    preferred = os.path.join(dest_dir, f"{base}.{MERGE_FORMAT}")
-    if os.path.isfile(preferred):
-        return os.path.abspath(preferred)
+    for base in dict.fromkeys((_safe_video_id(url), _legacy_video_id(url))):
+        preferred = os.path.join(dest_dir, f"{base}.{MERGE_FORMAT}")
+        if os.path.isfile(preferred):
+            return os.path.abspath(preferred)
 
-    candidates = [
-        c for c in glob.glob(os.path.join(dest_dir, f"{base}.*"))
-        if os.path.isfile(c)
-        and not (c.endswith(".ytdl") or c.endswith(".part"))
-    ]
-    if not candidates:
-        return None
-    return os.path.abspath(max(candidates, key=os.path.getmtime))
+        candidates = [
+            c for c in glob.glob(os.path.join(dest_dir, f"{base}.*"))
+            if os.path.isfile(c)
+            and not (c.endswith(".ytdl") or c.endswith(".part"))
+        ]
+        if candidates:
+            return os.path.abspath(max(candidates, key=os.path.getmtime))
+    return None
 
 
-def _download_via_cli(url: str, out_dir: str, base: str, opts: dict) -> str:
-    """Fallback: shell out to the ``yt-dlp`` binary when the module is absent."""
+def _download_via_cli(url: str, out_dir: str, base: str) -> str:
+    """Fallback: shell out to the ``yt-dlp`` binary when the module is absent.
+
+    Mirrors the module path's codec cap, sort order, retries, and container so
+    both routes produce an identical file. The module API takes
+    ``remote_components`` as a list; the CLI takes it as one comma-separated arg.
+    """
     _ensure_ffmpeg()
     cmd = [
         "yt-dlp",
@@ -177,17 +232,19 @@ def _download_via_cli(url: str, out_dir: str, base: str, opts: dict) -> str:
         "-S", _FORMAT_SORT,
         "--merge-output-format", MERGE_FORMAT,
         "--no-part",
+        "--no-playlist",
         "--retries", str(_RETRIES),
+        "--fragment-retries", str(_RETRIES),
+        "--concurrent-fragments", "4",
+        "--no-hls-use-native",
         "--newline",
     ]
-    if opts.get("noplaylist"):
-        cmd.append("--no-playlist")
     cmd += [url, "-o", os.path.join(out_dir, f"{base}.%(ext)s")]
     log.info("downloading via yt-dlp CLI: %s", " ".join(cmd))
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
         raise DownloadError(f"yt-dlp CLI exited with status {result.returncode}")
-    return _resolve_output(out_dir, base, None)
+    return _resolve_output(out_dir, base)
 
 
 def _download_via_module(url: str, out_dir: str, base: str, opts: dict) -> str:
@@ -197,12 +254,12 @@ def _download_via_module(url: str, out_dir: str, base: str, opts: dict) -> str:
     log.info("downloading %s (Apple-TV playable: VP9/H.264 + AAC) into %s", url, out_dir)
     ydl = yt_dlp.YoutubeDL(opts)
     try:
-        info = ydl.extract_info(url, download=True)
+        ydl.extract_info(url, download=True)
     except Exception as e:  # yt-dlp raises a moving hierarchy; re-wrap all
         print()                   # clear a leftover progress line first
         raise DownloadError(f"yt-dlp failed to download {url!r}: {e}") from e
     else:
-        result_path = _resolve_output(out_dir, base, info)
+        result_path = _resolve_output(out_dir, base)
         log.info("download complete -> %s", result_path)
         return os.path.abspath(result_path)
     finally:
@@ -230,21 +287,21 @@ def download(url: str, dest_dir: str | None = None) -> str:
         A media source URL (YouTube, or any URL yt-dlp understands).
     dest_dir:
         Directory to write into. When ``None`` a fresh, unique temp directory is
-        created -- recommended for the download -> transcode -> airplay pipeline,
-        since the caller (the transcoder) still owns the file afterward.
+        created, since the caller (``cli.py``) owns the file afterward and is
+        responsible for deleting it.
 
     Returns
     -------
     str
         Absolute path to the single merged MP4 on disk. The file is NOT deleted
-        by this call; pass it to ``transcoder.transcode`` next.
+        by this call; pass it to :func:`airplay_yt.airplay.stream` next.
     """
     out_dir = os.path.abspath(dest_dir or tempfile.mkdtemp(prefix="airplay-yt-"))
     os.makedirs(out_dir, exist_ok=True)
     base = _safe_video_id(url)
-    opts = _build_opts(url, out_dir)
+    opts = _build_opts(out_dir)
 
     if _module_available("yt_dlp"):
         return _download_via_module(url, out_dir, base, opts)
     log.info("yt_dlp module unavailable; falling back to yt-dlp CLI")
-    return _download_via_cli(url, out_dir, base, opts)
+    return _download_via_cli(url, out_dir, base)
