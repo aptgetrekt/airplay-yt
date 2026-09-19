@@ -1,15 +1,265 @@
 # airplay-yt
 
-Take a video URL (such as a YouTube link) or a local file, pull it down in the
-highest quality **an Apple TV can play natively** (URL case only), and stream it
+Take a video URL (such as a YouTube link) or an existing local file, and stream it
 to an Apple TV on your local network over AirPlay.
 
-The key choice in this project is that the download step already selects a
-codec the Apple TV decodes in hardware — **VP9 video with a fallback to
-H.264, paired with the best AAC audio, all muxed into an MP4 container**.
-Because of that, there is **no separate re-encode / transcode step**: the file
-the download produces is handed straight to the Apple TV. On an Apple TV 4K,
-a 4K VP9 + AAC file this way plays at full quality.
+The central design choice is that the download step selects a rendition the Apple
+TV decodes in hardware — **VP9 video with an H.264 fallback, paired with AAC
+audio, muxed into an MP4 container**. Because of that there is **no separate
+re-encode or transcode step**: the file the download produces is handed straight
+to the Apple TV. On an Apple TV 4K, a 4K VP9 + AAC file selected this way plays at
+full quality.
+
+## Contents
+
+- [Status](#status)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Usage](#usage)
+- [How it works](#how-it-works)
+- [Why there is no transcode step](#why-there-is-no-transcode-step)
+- [Monkey patches for pyatv](#monkey-patches-for-pyatv)
+- [Known limitations](#known-limitations)
+- [Troubleshooting](#troubleshooting)
+- [Project layout](#project-layout)
+- [Other documentation](#other-documentation)
+
+---
+
+## Status
+
+The project is a working pipeline. The original plan had three stages; the
+transcode stage is not on the active path, and two runtime patches replace what
+would otherwise be a forked `pyatv` dependency.
+
+| Component | Status | Notes |
+|---|---|---|
+| `downloader.py` — fetch a URL at the highest Apple-TV-playable quality | Working | `yt-dlp` with a hard codec cap (`VP9 → H.264 → best combined`, always AAC, always MP4). Temp-dir handling, output resolution, and error wrapping are done. Cached reuse for `--keep` is done, including an older naming scheme. |
+| `airplay.py` — stream a file to an Apple TV | Working | Async wrapper over `pyatv`. Discovers the device, applies stored credentials by hand, pairs on first use, and blocks for the full duration of playback. |
+| `monkey_patches/` — runtime fixes for `pyatv` | Working, version-pinned | Two patches plus a version guard. Required on `pyatv 0.18.0`; see [Monkey patches for pyatv](#monkey-patches-for-pyatv). |
+| `cli.py` — command line that wires the pipeline | Working | `airplay-yt` console script. One status line per stage, `--url` / `--file` / `--device` / `--pin` / `--keep` / `--save-path`, and cleanup. |
+| `transcoder.py` — hardware-accelerated ffmpeg re-encode | Placeholder | Not on the active path. The file raises `NotImplementedError` and nothing imports it. |
+
+### Verification status
+
+Stated precisely, because the difference matters:
+
+- **Local-file streaming to a real Apple TV: confirmed.** Repeated runs streaming
+  an H.264/AAC MP4 from disk to an Apple TV 4K on tvOS 27 completed with exit
+  code 0, with playback events visible in the logs (play-queue commands accepted,
+  `playbackState` messages received) and end-of-media detected by the receiver's
+  own event.
+- **Download and merge: confirmed.** A real YouTube download produced
+  `362,111,397` bytes of merged MP4 from a 342 MiB video stream plus a 3.29 MiB
+  audio stream.
+- **Full URL to playback in a single run: not confirmed.** The run that downloaded
+  the file above was interrupted during the streaming stage, so the download half
+  is proven and the AirPlay half of *that* run is not. See
+  [STREAMING.md](STREAMING.md).
+- **No automated test suite.** There are no tests in the repository; everything
+  above is from manual runs against real hardware.
+
+---
+
+## Requirements
+
+- **Python 3.13+** (`requires-python = ">=3.13"`).
+- **`ffmpeg` on your `PATH`** — used to mux separate video and audio tracks into
+  one MP4. Install it with `apt install ffmpeg`, `brew install ffmpeg`,
+  `choco install ffmpeg`, or `winget install Gyan.FFmpeg`.
+- **`yt-dlp`**, installed automatically as a dependency. It fetches the source.
+  The downloader also asks yt-dlp for its JS ("EJS") challenge solver
+  (`remote_components = ["ejs:github"]`), which yt-dlp fetches from GitHub at
+  download time. Without it, some VP9 streams are dropped and a lower-quality or
+  non-native rendition may be selected.
+- **An Apple TV on the same local network**, reachable by name or IP. Modern
+  receivers (tvOS 26 / 27) are supported through the runtime patches described
+  below.
+- **AirPlay pairing**, and the PIN the TV displays the first time you connect.
+
+---
+
+## Install
+
+```bash
+git clone <repo-url> airplay-yt
+cd airplay-yt
+uv sync
+```
+
+`uv sync` installs everything, including stock `pyatv` from PyPI. There is no git
+dependency and no submodule to initialize.
+
+`pyatv` is pinned to `==0.18.0` in `pyproject.toml`. That pin is deliberate: the
+runtime patches reach into `pyatv` internals, so a different version could change
+or duplicate their behavior. See
+[Monkey patches for pyatv](#monkey-patches-for-pyatv) before changing it.
+
+The `airplay-yt` console script is installed by `uv sync`. Use it through the
+project environment, or activate that environment first:
+
+```bash
+uv run airplay-yt --help
+
+# or
+source .venv/bin/activate        # .venv\Scripts\activate on Windows
+airplay-yt --help
+```
+
+---
+
+## Usage
+
+### 1. Pair the Apple TV (once per device)
+
+AirPlay requires a one-time pairing so the Apple TV trusts this machine. The first
+time you play to a given device, `airplay-yt` pairs it automatically and
+interactively. Enter the PIN the TV displays, and the credentials are written to
+`~/.pyatv.conf`. Later plays to that device connect silently.
+
+```bash
+airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --device "Living Room Apple TV"
+```
+
+The first run looks like this:
+
+```text
+[1/2] Downloading https://www.youtube.com/watch?v=dQw4w9WgXcQ
+[download] 100% of  342.00MiB in 00:00:06 at 51.65MiB/s
+[2/2] Streaming dQw4w9WgXcQ.mp4 to Living Room Apple TV ...
+enter PIN shown on Living Room Apple TV (192.168.1.80):
+```
+
+While that prompt is open, the TV shows a request to allow the connection and a
+PIN. The following is a representation of that screen, not a capture, and the
+wording varies by tvOS version:
+
+```text
+┌───────────────────────────────────────────────────┐
+│                                                   │
+│                      AirPlay                      │
+│                                                   │
+│           "pyatv" wants to play video on          │
+│                   this Apple TV                   │
+│                                                   │
+│                   PIN:   1 2 3 4                  │
+│                                                   │
+│       To allow, enter this PIN on the device      │
+│             you are using to connect.             │
+│                                                   │
+└───────────────────────────────────────────────────┘
+```
+
+Type that PIN at the `enter PIN shown on ...` prompt and press Return. The TV
+then plays the file. When playback ends, `airplay-yt` prints `done` and exits `0`.
+
+#### Fallback: pair with `atvremote wizard`
+
+If automatic pairing does not work — no PIN prompt appears, pairing fails, or you
+see an authentication error — pair manually with the `atvremote` tool that ships
+with `pyatv`. It writes to the same `~/.pyatv.conf` that `airplay-yt` reads, so
+pairing this way is equivalent and only has to be done once per device.
+
+```bash
+uv run atvremote wizard
+```
+
+The wizard scans, lists what it found, and asks you to pick a device by number:
+
+```text
+Looking for devices...
+Found the following devices:
+    Name                  Model                Address
+--  --------------------  -------------------  -------------
+ 1  Living Room Apple TV  Apple TV 4K (gen 3)  192.168.1.129
+ 2  Bedroom HomePod       HomePod Mini         192.168.1.218
+ 3  Living Room HomePod   HomePod Mini         192.168.1.223
+ 4  Office HomePod        HomePod Mini         192.168.1.114
+Enter index of device to set up (q to quit):
+```
+
+Enter the number next to your Apple TV. The wizard then works through each
+protocol the device offers, skipping the ones that need no pairing, and asks for
+the on-screen PIN (`Enter PIN on screen:`) where the device provides one. It
+finishes by connecting and printing what is currently playing. Afterwards,
+re-run `airplay-yt`; it does not need the PIN again.
+
+### 2. Play a video from a URL
+
+```bash
+# One Apple TV on the network: selected automatically.
+airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+# Several devices: choose one by name, IP address, or device id.
+airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --device "Living Room Apple TV"
+```
+
+### 3. Play a local file
+
+`--file` streams a file you already have and skips the download step entirely.
+`--url` is not needed.
+
+```bash
+airplay-yt --file ~/Videos/airplay-yt/dQw4w9WgXcQ.mp4 \
+            --device "Living Room Apple TV"
+
+# Auto-select the only Apple TV on the network.
+airplay-yt --file ./some-video.mp4
+```
+
+The file is used exactly as given: nothing is copied, downloaded, or deleted. A
+missing path is reported before any AirPlay connection is attempted. The file must
+already be in a format the receiver plays natively (VP9 or H.264 video with AAC
+audio in MP4) — `--file` performs no transcoding.
+
+### 4. Keep downloads and reuse them
+
+Without `--keep`, the download goes into a temporary directory that is removed
+after playback.
+
+```bash
+airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --device "Living Room Apple TV" \
+            --keep \
+            --save-path "$HOME/Videos/airplay-yt"
+```
+
+With `--keep`, the file is written to a persistent directory instead (default
+`~/Videos/airplay-yt`, overridden by `--save-path`). If a copy of the same URL is
+already there, the download is skipped and the existing file is streamed:
+
+```text
+[1/2] Using existing dQw4w9WgXcQ.mp4 (skipping download)
+```
+
+### Options
+
+| Flag | Alias | Default | Description |
+|---|---|---|---|
+| `--url` | — | required unless `--file` | Source URL: any link `yt-dlp` understands (YouTube and many other hosts). |
+| `--file` | `-f` | — | Path to an existing local media file. Skips the download; `--url` is then unnecessary. The file is never modified or deleted. |
+| `--device` | `-D` | auto-select | Target Apple TV by name, IP address, or device id. Omitted, it auto-selects only when exactly one device is discovered; otherwise it fails and lists the devices found. |
+| `--pin` | `-p` | prompt | AirPlay pairing PIN. Used only when the receiver does not display its own PIN; see [Known limitations](#known-limitations). |
+| `--keep` | — | off | Keep the download instead of deleting it, and reuse a cached copy of the same URL on later runs. Ignored with `--file`. |
+| `--save-path` | — | `~/Videos/airplay-yt` | Directory `--keep` writes into. Ignored unless `--keep` is set. |
+| `-h`, `--help` | — | — | Show help. |
+
+Exit codes: `0` on success, `1` on failure, `130` on interrupt (Ctrl-C), `2` on a
+usage error.
+
+Status messages and download progress go to stderr, so stdout stays clean.
+
+### Lower-level: AirPlay a local file directly
+
+The AirPlay stage is usable on its own, using the same `~/.pyatv.conf` credentials
+and the same automatic pairing:
+
+```bash
+uv run python -m airplay_yt.airplay /path/to/somefile.mp4 "Living Room Apple TV"
+uv run python -m airplay_yt.airplay /path/to/somefile.mp4 192.168.1.80
+```
 
 ---
 
@@ -25,261 +275,163 @@ a 4K VP9 + AAC file this way plays at full quality.
   (--file <path>)   (download skipped)
 ```
 
-1. **Download** — fetch the source URL with `yt-dlp` and choose the
-   highest-quality rendition the Apple TV decodes natively (VP9 → H.264 → best
-   available combined stream), muxing separate video and audio into a single
-   MP4. With `--file` this stage is skipped entirely and a local path is used
-   as-is.
-2. **AirPlay** — hand that file to the target Apple TV for playback via
-   `pyatv`. The library serves the file itself, so no media server is needed.
+1. **Download** (`downloader.py`) — fetch the URL with `yt-dlp`, choose the
+   highest-quality rendition the Apple TV decodes natively, and mux separate video
+   and audio into one MP4. With `--file` this stage is skipped.
+2. **AirPlay** (`airplay.py`) — hand the file to the target Apple TV via `pyatv`.
+   pyatv serves the file from a short-lived local HTTP server, so no external
+   media server is needed. The call blocks for the full duration of playback.
 
-> **Note on transcoding.** An early design planned a third stage
-> (`transcoder.py`) to re-encode the download into an AirPlay-friendly file.
-> It turns out a correctly-chosen download rendition is already playable, so
-> `transcoder.py` is an **unused placeholder** — it is not on the active path.
-> See [Status](#status) for the full picture.
+The two stages run in sequence: the download must finish before playback starts.
+See [STREAMING.md](STREAMING.md) for why, and what early playback would require.
+
+### Rendition selection
+
+The selector is a hard codec cap, not just a preference order
+(`downloader.py:47`):
+
+```
+bv[vcodec^=vp9]+ba[acodec^=mp4a]      preferred
+/ bv[vcodec^=avc1]+ba[acodec^=mp4a]   fallback
+/ bv+ba/b                             last resort
+```
+
+Within that capped set, the best candidate is picked by
+`vcodec:vp9,res,br,acodec:aac,ext:mp4:m4a`. A sort alone is not enough: when
+yt-dlp's challenge solver is unavailable some VP9 streams are dropped, and a
+higher-ranked AV1/Opus rendition can win. Apple TV decodes H.264 and VP9 with AAC
+but **not** AV1 or Opus, so the cap is what guarantees a playable file.
 
 ---
 
-## Requirements
+## Why there is no transcode step
 
-- **Python 3.13+**.
-- **`ffmpeg`** on your `PATH` — used to mux separate video and audio tracks into
-  one MP4.
-- The **`yt-dlp`** package (installed automatically as a dependency; it fetches
-  the source).
-- An **Apple TV** on the same local network, reachable by its name or IP.
-  Modern Apple TVs (tvOS 26 / 27) are supported; they are handled by runtime
-  patches over stock `pyatv` from PyPI, so no fork install is needed (see below).
-- AirPlay pairing, and a **PIN** shown on the TV the first time you connect.
+Apple TV 4K decodes 4K VP9 + AAC natively, so a correctly chosen download is
+already the right format. On a 1080p Apple TV the same selector falls back to the
+best H.264 + AAC rendition, which that device also plays without re-encoding.
+
+`transcoder.py` remains in the tree as an unimplemented stub so a future version
+could add a hardware re-encode path for unusual sources. Nothing imports it.
 
 ---
 
-## Install (with `uv`)
+## Monkey patches for pyatv
 
-```bash
-# 1. Get the source.
-git clone <repo-url> airplay-yt
-cd airplay-yt
+Released `pyatv` cannot deliver video to Apple TVs on tvOS 26/27. Two fixes exist
+in unreleased upstream work. Rather than depend on a fork, this project applies
+them to the installed `pyatv` at runtime, from `src/airplay_yt/monkey_patches/`:
 
-# 2. Create the virtualenv and install everything (project + yt-dlp + pyatv
-#    from PyPI). `uv sync` needs no activation.
-uv sync
-```
+| Module | Purpose |
+|---|---|
+| `play_queue_patch.py` | The play-queue protocol rewrite (upstream PR #2774 / #2899). Modern receivers drive video through `POST /command` with PTP timing; the legacy `POST /play` handshake used by `pyatv 0.18.0` makes the session activate without media ever arriving. |
+| `tvos_patch.py` | Injects the Apple `psi` that tvOS 26.6/27 no longer reports on `GET /info`. Without it the remote control session that carries the play queue cannot be registered. |
+| `_pyatv_guard.py` | Version check and upstream-fix detection shared by the two patches. |
 
-`uv sync` installs **stock `pyatv` from PyPI**. Released `pyatv` cannot play video
-to Apple TVs running tvOS 26/27, so the play-queue protocol fix is applied at
-runtime by `src/airplay_yt/monkey_patches/play_queue_patch.py` instead of by pinning a fork. `uv
-sync` (and `uv run`) set everything up; there is no submodule to initialize and
-no git dependency to fetch.
+`airplay.py` applies both before connecting, in that order, and logs a warning if
+either fails to apply. Both are idempotent. The guard warns when the installed
+`pyatv` is not the expected version, and each patch skips itself when the
+installed `pyatv` already provides the fix — so a future release can make these
+modules obsolete, and the logs will say so.
 
-The `yt-dlp` binary and its optional JS challenge solver are installed as part
-of the project's dependencies.
+### If you change the pyatv version
 
-### Using the CLI
+`pyproject.toml` pins `pyatv==0.18.0` because these patches are written against
+that release's internals. Before changing the pin:
 
-`uv sync` installs a console script called `airplay-yt`. Use it either directly
-through the project's virtualenv or without activating it:
+1. Check whether the play-queue fix and the psi fix have shipped upstream. If so,
+   delete the corresponding patch module and its `apply()` call in `airplay.py`.
+2. If a patch is still needed, re-verify it against the new `pyatv`. Each module
+   docstring lists the modules, methods, signatures, and attributes it touches.
+3. Re-test on a real Apple TV on tvOS 26/27. A patch that stops applying is quiet
+   from the receiver's side: it accepts the legacy path and plays no video.
 
-```bash
-# Without activating the virtualenv:
-uv run airplay-yt --help
-
-# Or activate the virtualenv created by `uv sync`:
-source .venv/bin/activate        # .venv\Scripts\activate on Windows
-airplay-yt --help
-```
+The full detail lives in the `MAINTENANCE` sections of `pyproject.toml` and each
+patch module's docstring.
 
 ---
 
-## Usage
+## Known limitations
 
-### 1. Pair the Apple TV (one time per device)
-
-AirPlay requires a one-time **pairing** so the Apple TV trusts this machine.
-The first time you play to a given device, `airplay-yt` pairs it **automatically
-and interactively**. The PIN is the 4-digit number the Apple TV shows when it
-asks you to allow the connection. The resulting credentials are written to
-`~/.pyatv.conf`, so pairing happens only **once** — every later play to the same
-TV connects silently.
-
-**Interactive (prompts for the PIN on the first play):**
-
-```bash
-airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
-            --device "Living Room Apple TV"
-```
-
-On the first run you will see the download happen, then a prompt:
-
-```text
-[1/2] Downloading https://www.youtube.com/watch?v=dQw4w9WgXcQ
-[download] 100% of  234.5MiB in 00:00:15 at 15.3MiB/s
-[2/2] Streaming dQw4w9WgXcQ.mp4 to Living Room Apple TV ...
-enter PIN shown on Living Room Apple TV (192.168.1.80):
-```
-
-When the Apple TV prompts to allow the AirPlay connection (this happens right
-after the download starts streaming), enter the PIN it shows at the prompt and
-press **Return**. The credentials are saved; the video plays afterward.
-
-**Non-interactive (provide the PIN up front):**
-
-```bash
-# 1. Trigger pairing (play anything once, or open AirPlay Settings on the TV);
-#    read the 4-digit PIN off the TV when it appears.
-# 2. Supply that PIN so the program never blocks on a prompt:
-airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
-            --device "Living Room Apple TV" \
-            --pin 1234
-```
-
-> If a PIN is required but not supplied with `--pin`, the program prompts for it.
-
-### 2. Play a video on the paired Apple TV
-
-Once paired, the credential in `~/.pyatv.conf` lets later plays connect
-without a PIN.
-
-```bash
-# Single Apple TV on the network -- auto-selected:
-airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-
-# Multiple Apple TVs on the network -- choose one by name or IP:
-airplay-yt --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
-            --device "Living Room Apple TV"
-
-# Keep the downloaded file on disk after streaming (otherwise it is deleted).
-# With --keep the file is stored in ~/Videos/airplay-yt instead of a temp dir
-# (override the location with --save-path); re-running the same URL reuses the
-# cached copy instead of downloading it again:
-airplay-yt --url "https://www.youtube.com/watch?v=x" \
-            --device "Dining Room Apple TV" \
-            --keep \
-            --save-path "$HOME/Videos/airplay-yt"
-```
-
-For each play, the program:
-
-1. **Downloads** the URL to a fresh temporary directory, showing YouTube's
-   own progress line (percentage, speed, ETA) as it goes. With `--keep` the
-   file is written to the persistent save directory (default `~/Videos/airplay-yt`,
-   override with `--save-path <dir>`) instead, and if a cached copy of the same
-   URL is already there the download is **skipped** and the existing file is
-   streamed right away.
-2. **Streams** that file to the Apple TV; this call blocks for the full
-   duration of the media. Press **Ctrl-C** at any time to stop; the pending
-   playback is cancelled and the temporary file is removed.
-3. **Cleans up** by removing the temporary download directory — unless you
-   passed `--keep`, in which case the file is left on disk in the save
-   directory and its location is printed.
-
-### Options
-
-| Flag | Aliases | Default | Description |
-|---|---|---|---|
-| `--url` | — | *required unless `--file`* | The source URL: any link `yt-dlp` understands (YouTube and many other hosts). Not needed when `--file` is given. |
-| `--file` | `-f` | — | Path to an existing local media file. Streams that file directly and **skips the download step**; `--url` is then unnecessary. The file is left on disk afterwards (`--keep` / `--save-path` are ignored). |
-| `--device`, `-D` | — | auto-pick | Target Apple TV by **name**, **IP address**, or device id. Omit to auto-select when exactly one device is on the network. |
-| `--pin`, `-p` | — | *prompt* | The AirPlay pairing PIN, supplied non-interactively. When omitted, the program prompts for it on first use. |
-| `--keep` | — | *off* | Leave the downloaded file on disk after streaming rather than deleting it. The file is written to the persistent save directory (default `~/Videos/airplay-yt`; override with `--save-path`) instead of a temp dir, and a cached copy of the same URL is reused on later runs instead of re-downloaded. Ignored with `--file`. |
-| `--save-path` | — | `~/Videos/airplay-yt` | Directory that `--keep` downloads into and keeps files in. Ignored unless `--keep` is set. |
-| `-h`, `--help` | — | — | Show the help page. |
-
-### 3. Play a local file (skip the download)
-
-If you already have a file on disk — including one saved earlier with `--keep` —
-stream it directly with `--file`. No download runs, so `--url` is not needed:
-
-```bash
-airplay-yt --file ~/Videos/airplay-yt/dQw4w9WgXcQ.mp4 \
-            --device "Living Room Apple TV"
-
-# Auto-pick the only Apple TV on the network, no URL:
-airplay-yt --file ./some-video.mp4
-```
-
-The file is used exactly as given: nothing is copied, downloaded, or deleted.
-A missing path is reported before any AirPlay connection is attempted. Pairing
-works the same as above, so `--pin` applies here too. The file must already be
-in a format the Apple TV plays natively (VP9/H.264 + AAC in MP4) — `--file`
-performs no transcoding.
-
-### Lower-level: AirPlay a local file directly
-
-The AirPlay stage is usable on its own to stream a file you already have, using
-the same `~/.pyatv.conf` credentials (and it pairs on first use, same as the
-CLI above):
-
-```bash
-uv run python -m airplay_yt.airplay /path/to/somefile.mp4 "Living Room Apple TV"
-uv run python -m airplay_yt.airplay /path/to/somefile.mp4 192.168.1.80
-```
+- **`--pin` cannot skip the prompt for TVs that display their own PIN.** When the
+  receiver provides the PIN, the program always asks for it interactively, and
+  `--pin` is ignored. `--pin` applies only when the receiver does not provide one.
+- **Download and playback are sequential.** Playback cannot begin until the file
+  has been downloaded and merged. Analyzed in [STREAMING.md](STREAMING.md).
+- **No transcoding.** Whatever the download selects is what plays. A source with
+  no VP9 and no H.264 + AAC rendition may not play; the last-resort selector
+  (`bv+ba/b`) can pick a non-native codec rather than fail.
+- **Playback state control is minimal.** There is no pause, resume, seek, or stop
+  command; the program blocks until the media ends or you interrupt it.
+- **`--file` performs no validation.** A file in an unsupported codec is sent
+  as-is and may show a black screen while audio plays.
+- **Cached reuse is name-based.** With `--keep`, a cached file is matched by a
+  stem derived from the URL, so two different URLs that canonicalize to the same
+  name would share an entry.
+- **Interrupted `--keep` downloads can leave partial files.** A download that
+  fails or is cancelled mid-way leaves `yt-dlp`'s `.part` files in the save
+  directory. Only the temporary-directory path is cleaned up automatically.
 
 ---
 
-## Status
+## Troubleshooting
 
-The project is a working skeleton where **two of the three original pipeline
-stages are implemented and tested**, and the third (transcoding) has been
-removed from the active path:
+Start with the two patch warnings. `airplay.py` logs one per patch that failed to
+apply, and either one means video will not reach the TV:
 
-| Component | Status | Notes |
+```
+play-queue patch is not active; video playback on tvOS 26/27 will not work. Verify the patch against the installed pyatv version.
+psi patch is not active; the remote control session modern receivers need may fail. Verify the patch against the installed pyatv version.
+```
+
+If you see those, the installed `pyatv` is not what the patches expect. Check the
+pin in `pyproject.toml` and read
+[If you change the pyatv version](#if-you-change-the-pyatv-version).
+
+To see the full logs, run the AirPlay stage with debug logging enabled:
+
+```bash
+uv run python -c "
+import logging
+logging.basicConfig(level=logging.DEBUG, format='%(name)s %(message)s')
+from airplay_yt import airplay
+airplay.stream('/path/to/file.mp4', target='Living Room Apple TV')
+"
+```
+
+| Symptom | Likely cause | What to do |
 |---|---|---|
-| `downloader.py` — fetch a URL at the highest Apple-TV-playable quality | ✅ Implemented | `yt-dlp` with a codec cap of `VP9 → H.264 → best combined`, always `AAC` audio, always muxed into `MP4`. No transcode needed. Temp-dir handling, resolution of the produced file, and error wrapping are done. Tested end-to-end with real YouTube and sample URLs. |
-| `airplay.py` — stream a file to an Apple TV | ✅ Implemented | Async wrapper over `pyatv`. Applies `play_queue_patch` (the play-queue `POST /command` protocol modern receivers need) and `tvos_patch` (the `psi` those receivers no longer report on `GET /info`) before connecting, so stock PyPI `pyatv` works. Credentials are applied from `~/.pyatv.conf` by hand. Auto-pairs on first use. |
-| `cli.py` — command line that wires the pipeline | ✅ Implemented | `airplay-yt` console script. Prints a status line per stage, shows the download progress, handles `--device` / `--pin` / `--keep` / `--save-path` / `--file`, and cleans up. `--file` bypasses the download and streams a local path directly; one of `--url` or `--file` is required. Tested via both `uv run airplay-yt` and `python -m airplay_yt`. |
-| `transcoder.py` — hardware-accelerated ffmpeg re-encode | ⚠️ Placeholder | Not on the active path. The download stage already produces a natively-playable rendition, so a re-encode is not needed. The file is a stub that raises `NotImplementedError`. |
+| `airplay failed: no Apple TV or AirPlay device found on the network` | Discovery found nothing within its 10-second window, or the TV is on another network/VLAN. | Check the TV is awake and on the same subnet. Retry. |
+| `airplay failed: multiple devices found, pass a target to select one: ...` | More than one AirPlay device was discovered and no `--device` was given. | Pass `--device` with one of the listed names or addresses. |
+| `airplay failed: no discovered device matches target '...'` | The `--device` value matches no discovered device. | Use the exact name, IP address, or device id from the error listing. |
+| `airplay failed: media file not found: ...` | The `--file` path does not exist, after expansion of `~`. | Check the path. Relative paths resolve against the current directory. |
+| No PIN prompt appears, then pairing fails | The TV never showed the request, or the PIN was not entered in time. | Pair with `uv run atvremote wizard` instead; see [the fallback](#fallback-pair-with-atvremote-wizard). |
+| `AuthenticationError: not authenticated`, or a `403` during setup | No usable credentials for this device in `~/.pyatv.conf`, so the receiver rejects the session. | Pair with `uv run atvremote wizard`, then retry. |
+| Black screen while audio plays | The selected rendition uses a codec the receiver cannot decode (AV1 or Opus). | Confirm with the debug logs which codec was downloaded. This happens when no VP9 or H.264 + AAC rendition was available. |
+| Playback starts, then the picture collapses after roughly twenty seconds | The play-queue patch is not active, so the session fell back to a setup the modern receiver accepts but does not sustain. | Check for the patch warning above and verify the `pyatv` version. |
+| Video never appears on the TV, but the command returns normally | The legacy `POST /play` path was used. | Check for the play-queue patch warning; capture debug logs. |
+| `download failed: ...` and the log mentions muxing or merging | `ffmpeg` is missing from `PATH`, so separate video and audio streams cannot be merged. | Install `ffmpeg` and retry. |
+| A long Python traceback instead of a clean `airplay failed:` line | Errors raised by `pyatv` (pairing, authentication, connection loss) are not wrapped by this project, so they propagate as-is. | Read the last traceback lines for the pyatv exception type; the table above maps the common ones. |
 
-Stock PyPI `pyatv 0.18.0` cannot play video to Apple TVs running tvOS 26/27, so
-this project carries the fixes as two runtime monkey-patches rather than a forked
-dependency:
+Note on the last row: only discovery, file, and media-path failures are converted
+into a clean `airplay failed: ...` message. Anything raised inside `pyatv` itself
+surfaces as an unhandled exception with a traceback. The exit code is still `1`
+in both cases.
 
-- `monkey_patches/play_queue_patch.py` — the play-queue protocol rewrite from
-  upstream PR #2774 / #2899 (video is driven through `POST /command`, not the
-  legacy `POST /play` that these receivers reject).
-- `monkey_patches/tvos_patch.py` — the `psi` injection those receivers
-  additionally need.
+### Resetting pairing
 
-Both apply automatically on every stream. `pyproject.toml` depends only on the
-published `pyatv` package, so `uv sync` needs no `[tool.uv.sources]` override, no
-git fetch, and no submodule. Once a released `pyatv` contains the play-queue fix,
-both patch modules can be deleted.
+If credentials are stale or the TV was reset, remove the stored entry and pair
+again. `~/.pyatv.conf` is shared with the `pyatv` CLI tools, so this also affects
+them:
 
-### Maintenance: what to do when the pyatv version changes
+```bash
+cp ~/.pyatv.conf ~/.pyatv.conf.bak     # back it up first
+rm ~/.pyatv.conf                       # or remove just the stale device entry
+uv run atvremote wizard
+```
 
-The two patch modules reach into pyatv internals, so they are **pinned to the shape
-of the pyatv release they were written against**. `pyproject.toml` therefore pins
-`pyatv==0.18.0` exactly, and the pin is deliberate — do not relax it to `>=`
-without doing the work below.
-
-On every pyatv upgrade:
-
-1. **Decide whether the patches are still needed at all.** Check whether the
-   play-queue fix (upstream PR #2774 / #2899) and the psi fix have shipped in the
-   new release. If they have, **delete the corresponding patch module**
-   (`monkey_patches/play_queue_patch.py` / `monkey_patches/tvos_patch.py`) and
-   remove its `apply()` call from `airplay.py` and its mention in
-   `pyproject.toml`. Leaving a patch in place for a fix that already exists is a
-   bug.
-2. **If a patch is still needed, re-verify it against the new pyatv.** Each module
-   docstring lists the exact modules, method names, signatures, and class
-   attributes it touches. Diff those against the installed pyatv and update the
-   patch for anything that moved, was renamed, or changed behavior.
-3. **Re-test on a real Apple TV on tvOS 26/27.** A patch that stops applying
-   fails quietly from the receiver's point of view: it accepts the legacy
-   `POST /play` path and plays no video at all.
-
-Both `apply()` functions return `False` and log the reason when they cannot patch,
-rather than raising, and `airplay.py` logs a warning for each inactive patch. After
-an upgrade, read those warnings — silence there is not proof of success.
-
-The guards are partly automatic. `monkey_patches/_pyatv_guard.py` holds the
-expected pyatv version (`EXPECTED_PYATV_VERSION`, which must match the pin in
-`pyproject.toml`); a mismatch logs a warning, and each patch **skips itself when
-the installed pyatv already provides the fix it would apply**, saying so in the
-log. Neither check blocks a run, so they are a prompt to re-verify — step 3 above
-is still the real test.
+The wizard skips any protocol that already has credentials, so the file has to be
+removed (or edited) before it will pair from scratch. Afterwards `airplay-yt` uses
+the new credentials with no further setup.
 
 ---
 
@@ -287,23 +439,44 @@ is still the real test.
 
 ```
 src/airplay_yt/
-├── __init__.py       # package metadata + `main()` delegating to the CLI
-├── __main__.py       # `python -m airplay_yt` entry point
-├── cli.py            # console script: download (or --file) -> airplay
-├── downloader.py     # fetch a URL in the highest Apple-TV-playable quality (yt-dlp)
-├── airplay.py        # stream that file to an Apple TV over AirPlay (pyatv)
-├── monkey_patches/   # runtime pyatv patches for tvOS 26/27 (see Status)
-│   ├── _pyatv_guard.py       # version check + upstream-fix detection
-│   ├── play_queue_patch.py   # play-queue protocol fix (POST /command)
-│   └── tvos_patch.py         # psi injection for the remote control session
-└── transcoder.py     # unused placeholder: hardware-accelerated re-encode (see Status)
+├── __init__.py            # package metadata and `main()` delegating to the CLI
+├── __main__.py            # `python -m airplay_yt` entry point
+├── cli.py                 # console script: download (or --file), then airplay
+├── downloader.py          # fetch a URL at the highest Apple-TV-playable quality
+├── airplay.py             # stream a file to an Apple TV over AirPlay
+├── monkey_patches/        # runtime pyatv fixes for tvOS 26/27
+│   ├── _pyatv_guard.py    # version check and upstream-fix detection
+│   ├── play_queue_patch.py  # play-queue protocol (POST /command)
+│   └── tvos_patch.py      # psi injection for the remote control session
+└── transcoder.py          # unimplemented placeholder, not on the active path
 ```
+
+---
+
+## Other documentation
+
+- [AIRPLAY.md](AIRPLAY.md) — how video playback was made to work on modern Apple
+  TV receivers: the diagnosis, the two fixes, and the evidence from the wire.
+- [STREAMING.md](STREAMING.md) — whether playback can start before the download
+  finishes, with the blockers, the options, and measured numbers.
+
+---
 
 ## Notes
 
-- **Credentials live in `~/.pyatv.conf`** — the same file `pyatv`'s `atvscripts` CLI (`atvremote` and friends) uses. Pairing through `airplay-yt` and pairing through a `pyatv` tool share the store, so you do not have to pair more than once.
-- **Why no transcode?** Apple TV 4K decodes 4K VP9 + AAC natively, so a correctly-chosen download is already the right format for that device. On a 1080p Apple TV the same selector falls back to the highest H.264 + AAC rendition available, which is again something that device plays without a re-encode. The `transcoder.py` stage remains in the tree so a future version can add a hardware re-encode path for unusual cases, but it is not needed today.
-- **`ffmpeg` is required on your `PATH`**, because when a source exposes its video and audio as separate streams — the common case on YouTube — those must be muxed together into one file before AirPlay, and that mux uses `ffmpeg`. Install it with `apt install ffmpeg`, `brew install ffmpeg`, `choco install ffmpeg`, or `winget install Gyan.FFmpeg`.
-- **`yt-dlp`'s EJS challenge solver** is used for the full high-quality VP9 stream ladder; without it, some modern YouTube URLs fall back to lower-quality or non-VP9 renditions. The solver ships with `yt-dlp`, and `uv sync` installs it.
-- **`play_queue_patch` and `tvos_patch` are applied automatically.** `stream()` in `airplay.py` patches `pyatv` so it can deliver video to modern tvOS receivers; you do not need to do anything to enable them, and they are reapplied on every stream, so a fresh `pyatv` install works with no extra setup. Both patch modules are self-contained and can be deleted once a released `pyatv` includes the fixes.
-- **Upgrading `pyatv` requires checking these patches.** They are pinned to `pyatv 0.18.0` internals (hence the exact pin in `pyproject.toml`). Before changing that version, confirm whether each patch is still needed and whether it still applies — see [Maintenance](#maintenance-what-to-do-when-the-pyatv-version-changes). `airplay.py` logs a warning when a patch is inactive.
+- **Credentials live in `~/.pyatv.conf`** — the same file the `pyatv` CLI tools
+  (`atvpair`, `atvremote`) use. Pairing through `airplay-yt` and pairing through a
+  `pyatv` tool share one store, so you only pair once per device. `airplay-yt`
+  reads that file itself and applies the credentials by hand, because `pyatv`'s
+  automatic application is unreliable for modern receivers.
+- **The download progress line comes from `yt-dlp` directly** (percentage, speed,
+  ETA). This project does not print its own progress bar. Because the downloader
+  runs yt-dlp with `quiet` set, that output goes to stderr along with this
+  project's own status lines, which keeps stdout clean.
+- **`ffmpeg` is required**, because sources that expose video and audio as separate
+  streams — the common case on YouTube — must be muxed into one file before
+  AirPlay. If `ffmpeg` is missing the downloader logs a warning rather than
+  failing early, and the merge step then fails.
+- **Temp downloads carry the `airplay-yt-` prefix**, which is how the CLI decides
+  what it may remove. A `--file` path is never removed, even if it sits in a
+  directory with that prefix.
