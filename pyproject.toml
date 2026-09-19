@@ -4,23 +4,38 @@ version = "0.1.0"
 description = "Download a video from a URL (or play a local file) and stream it to an Apple TV over AirPlay"
 readme = "README.md"
 requires-python = ">=3.13"
+# PyPI pyatv 0.18.0 cannot play video to Apple TV on tvOS 26/27: its AirPlay-v2
+# player uses the old POST /play handshake, which those receivers reject (the RTSP
+# session activates but media never flows). Rather than pin an unreleased fork as
+# a git dependency, the play-queue protocol rewrite from upstream PR #2774/#2899
+# is applied at runtime by airplay_yt.play_queue_patch, so the published package
+# is the only pyatv this project installs. airplay_yt.tvos_patch then adds the psi
+# injection those receivers additionally need.
+#
+# MAINTENANCE -- READ BEFORE CHANGING THE pyatv VERSION:
+# These patches reach into pyatv internals, so they are pinned to the shape of the
+# pyatv release they were written against (0.18.0). Whenever `pyatv` is upgraded:
+#   1. Check whether the play-queue fix (PR #2774 / #2899) and the psi fix have
+#      been released upstream. If so, delete the corresponding patch module
+#      (play_queue_patch.py / tvos_patch.py) and remove the note here.
+#   2. If a patch is still needed, diff it against the new pyatv: the patched
+#      modules, method names, signatures, and class attributes may have moved or
+#      been renamed. Update the patch until it applies cleanly (see the module
+#      docstrings, which list every module each patch touches).
+#   3. Re-test against a real modern Apple TV (tvOS 26/27). A patch that silently
+#      stops applying is worse than a loud failure: the receiver accepts the
+#      legacy POST /play path and plays no video at all.
+# Patches that no longer apply log an error and report False rather than raising,
+# so check the logs after an upgrade instead of assuming silence means success.
+# Some of this is automatic: airplay_yt._pyatv_guard compares the installed pyatv
+# against EXPECTED_PYATV_VERSION (which must match the pin below) and warns on a
+# mismatch, and each patch skips itself when the installed pyatv already provides
+# the fix it would apply. Keep EXPECTED_PYATV_VERSION in _pyatv_guard.py and the
+# pyatv pin below in step with each other.
 dependencies = [
-    "pyatv>=0.18.0",
+    "pyatv==0.18.0",
     "yt-dlp>=2026.08.19",
 ]
-
-# Upstream PyPI pyatv 0.18.0 cannot play video to Apple TV running tvOS 26/27: its
-# AirPlay-v2 player uses the old POST /play handshake, which these receivers reject
-# (the RTSP session activates but media never flows). The fix is the play-queue
-# protocol rewrite in pyatv PR #2899 (mikelambert:airplay-play-queue-fix), which
-# POSTs /command with PTP timing. The git source below pins that fork; a copy under
-# vendor/pyatv is the offline fallback (`uv pip install -e vendor/pyatv` re-points
-# the dev install at it).
-[tool.uv.sources]
-pyatv = {
-       git = "https://github.com/mikelambert/pyatv.git",
-       rev = "b24840990af7ae5505538d36fc42cef7b3cc348e",
-       }
 
 [project.scripts]
 airplay-yt = "airplay_yt.cli:main"

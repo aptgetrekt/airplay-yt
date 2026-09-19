@@ -21,13 +21,47 @@ setup tolerate a 403 on ``/info`` instead of aborting.
 
 This is a monkeypatch because the fix is not yet in any released pyatv. Apply it
 via :func:`apply` (idempotent) before connecting.
+
+MAINTENANCE -- READ BEFORE CHANGING THE pyatv VERSION
+----------------------------------------------------
+This patch is pinned to the shape of ``pyatv 0.18.0`` (see the pin in
+``pyproject.toml``) and depends on :mod:`airplay_yt.play_queue_patch` being
+applied first, because that module owns ``RCS_CLIENT_TYPE_UUID`` and
+``_setup_remote_control_session``, which this one layers on. On every pyatv
+upgrade:
+
+1. First check whether the psi fix has been released upstream. If so, delete
+   this module and remove the call to :func:`apply` in
+   :mod:`airplay_yt.airplay`.
+2. If it is still needed, re-verify it against the new pyatv. This patch reads
+   ``AirPlayStream.create_airplay_protocol``, the ``AirPlayV2`` class, its
+   ``context`` / ``rtsp`` attributes, and ``decode_bplist_from_body``; confirm
+   those still exist and behave the same. It also supplies the RCS session
+   method that a tvOS 26.6/27 receiver needs, so the play-queue patch must still
+   be applied (and still apply cleanly) for this one to work.
+3. Re-test against a real Apple TV on tvOS 26/27. If the psi is not injected the
+   remote control session fails and no video is delivered, even though the
+   stream call returns normally.
+
+:func:`apply` returns ``False`` (and logs why) when the pyatv pieces it needs are
+absent, so check its return value or the logs after an upgrade.
+
+Some of this is checked automatically at runtime by :mod:`airplay_yt._pyatv_guard`:
+the installed pyatv version is compared against the expected one (a mismatch logs
+a warning), and :func:`already_handled_upstream` detects a pyatv that injects the
+psi itself, in which case this module skips patching and says so. That detection
+is a heuristic on the installed method's source, so treat a skip as informative
+rather than proof -- step 3 (re-test on the device) is still the real check.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from typing import Optional
+
+from . import _pyatv_guard
 
 try:  # pragma: no cover - import guard for older trees
     from pyatv.const import Protocol
@@ -52,17 +86,63 @@ def _companion_psi(config) -> Optional[str]:
     return None
 
 
-def apply() -> bool:
-    """Apply the patch idempotently. Returns True if the patch is active."""
-    global _APPLIED
-    if not HAVE_RCS or _APPLIED:
-        return HAVE_RCS and _APPLIED
+def already_handled_upstream() -> bool:
+    """Return True when pyatv already injects the psi itself.
 
-    from pyatv.protocols.raop.protocols.airplayv2 import (
-        AirPlayV2 as _V2,
-        RCS_CLIENT_TYPE_UUID,
-    )
+    If a release learns the psi from the companion service and feeds it to the
+    remote control session (the same trick this patch performs), there is nothing
+    left to patch and this module can go. Detected by checking that the installed
+    implementation is pyatv's own and that its source consults a psi carried on
+    the stream context. This is a heuristic: a false negative means the patch is
+    applied over an equivalent implementation, which is harmless.
+    """
+    rcs = getattr(AirPlayV2, "_setup_remote_control_session", None)
+    if rcs is None or _pyatv_guard.owned_by_this_package(rcs):
+        return False
+    try:
+        source = inspect.getsource(rcs)
+    except (OSError, TypeError):  # pragma: no cover - no source available
+        return False
+    return "context.psi" in source
+
+
+def apply() -> bool:
+    """Apply the patch idempotently. Returns True if the psi fix is in effect.
+
+    :mod:`airplay_yt.play_queue_patch` supplies the play-queue implementation this
+    patch layers on (it owns ``RCS_CLIENT_TYPE_UUID`` and
+    ``_setup_remote_control_session``), so it must be applied first.
+
+    Returns True when the psi fix is in effect afterwards, whether from this
+    patch or from pyatv itself; False when the pyatv pieces are absent and no
+    patch was possible.
+    """
+    global _APPLIED
+    if _APPLIED:
+        return True
+    if not HAVE_RCS:
+        _LOGGER.warning(
+            "psi patch cannot be applied: this pyatv does not expose the AirPlay "
+            "stream types it patches (expected pyatv %s).",
+            _pyatv_guard.EXPECTED_PYATV_VERSION)
+        return False
+
+    _pyatv_guard.warn_if_unexpected(_LOGGER, "tvos_patch")
+
+    if already_handled_upstream():
+        _LOGGER.info(
+            "tvos_patch is not needed: pyatv %s already injects the psi. This "
+            "module can be deleted.",
+            _pyatv_guard.installed_version() or "(unknown version)")
+        _APPLIED = True
+        return True
+
+    from pyatv.protocols.raop.protocols.airplayv2 import AirPlayV2 as _V2
     from pyatv.support.http import decode_bplist_from_body
+
+    from . import play_queue_patch
+
+    rcs_client_type_uuid = play_queue_patch.RCS_CLIENT_TYPE_UUID
 
     orig_create = AirPlayStream.create_airplay_protocol
 
@@ -101,7 +181,7 @@ def apply() -> bool:
                              "controlType": 1,
                              "channelID": f"{psi}-RCS-1",
                              "clientUUID": str(uuid.uuid4()).upper(),
-                             "clientTypeUUID": RCS_CLIENT_TYPE_UUID,
+                             "clientTypeUUID": rcs_client_type_uuid,
                          }
                      ]
                 }

@@ -5,11 +5,18 @@ Uses the async `pyatv` library. The local file is handed to the Apple TV via
 server on the device's behalf -- so no external media server is needed here.
 
 Modern receivers (Apple TV 4K on tvOS 26.x / 27.x) broke the stock pyatv stream
-path: they no longer answer ``GET /info``, so pyatv cannot obtain the Apple psi
-needed to register the "remote control session" that carries the play queue, and
-playback silently falls back to a legacy path that delivers no video on tvOS 27.
-Module :mod:`airplay_yt.tvos_patch` fixes that; :func:`stream` applies it
-automatically before connecting.
+path in two ways. PyPI pyatv 0.18.0 still starts video with the legacy
+``POST /play`` handshake instead of the play queue on ``POST /command``, so no
+media is delivered (module :mod:`airplay_yt.play_queue_patch`); and the receiver
+no longer answers ``GET /info``, so the Apple psi needed to register the "remote
+control session" that carries that play queue is unknown (module
+:mod:`airplay_yt.tvos_patch`). :func:`stream` applies both patches automatically
+before connecting, so no forked pyatv install is needed.
+
+Both patch modules reach into pyatv internals and are pinned to ``pyatv 0.18.0``
+(the exact pin in ``pyproject.toml``). If the pyatv version changes, re-check
+whether each patch is still needed and whether it still applies; see the
+MAINTENANCE section in each patch module and in ``pyproject.toml``.
 
 Credentials are read from the pyatv config file written by the CLI
 (``atvpair`` / ``atvremote``) at ``~/.pyatv.conf`` and applied by hand. This is
@@ -26,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 import pyatv
@@ -33,7 +41,9 @@ import pyatv.exceptions
 from pyatv import const
 from pyatv.const import Protocol
 
-from . import tvos_patch
+from . import play_queue_patch, tvos_patch
+
+_LOGGER = logging.getLogger(__name__)
 
 PROTOCOL = const.Protocol.AirPlay
 # Reuse the credentials the pyatv CLI (`atvpair`/`atvremote`) already wrote.
@@ -148,8 +158,20 @@ async def _connect(config, loop, storage, pin=None):
 
 async def _stream(media_path, target=None, pin=None, storage_file=STORAGE_FILE):
     """Core async pipeline: discover, connect, play the local file."""
-    # Patch pyatv for modern receivers before anything touches the protocol.
-    tvos_patch.apply()
+    # Patch pyatv for modern receivers before anything touches the protocol:
+    # the play queue lives in POST /command, and the psi that unlocks the remote
+    # control session has to be injected. Both patches are pinned to pyatv 0.18.0
+    # (see their MAINTENANCE notes); failure here is reported but not fatal, so a
+    # receiver that works with stock pyatv still streams.
+    if not play_queue_patch.apply():
+        _LOGGER.warning(
+            "play-queue patch is not active; video playback on tvOS 26/27 will "
+            "not work. Verify the patch against the installed pyatv version.")
+    if not tvos_patch.apply():
+        _LOGGER.warning(
+            "psi patch is not active; the remote control session modern "
+            "receivers need may fail. Verify the patch against the installed "
+            "pyatv version.")
 
     path = Path(media_path).expanduser().resolve()
     if not path.is_file():

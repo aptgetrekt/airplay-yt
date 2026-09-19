@@ -1,4 +1,0 @@
-[submodule "vendor/pyatv"]
-	path = vendor/pyatv
-	url = https://github.com/mikelambert/pyatv.git
-	branch = airplay-play-queue-fix

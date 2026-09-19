@@ -115,7 +115,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pyatv", git = "https://github.com/mikelambert/pyatv.git?rev=b24840990af7ae5505538d36fc42cef7b3cc348e" },
+    { name = "pyatv", specifier = "==0.18.0" },
     { name = "yt-dlp", specifier = ">=2026.8.19" },
 ]
 
@@ -740,7 +740,7 @@ wheels = [
 [[package]]
 name = "pyatv"
 version = "0.18.0"
-source = { git = "https://github.com/mikelambert/pyatv.git?rev=b24840990af7ae5505538d36fc42cef7b3cc348e#b24840990af7ae5505538d36fc42cef7b3cc348e" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "chacha20poly1305-reuseable" },
@@ -754,6 +754,10 @@ dependencies = [
     { name = "tabulate" },
     { name = "tinytag" },
     { name = "zeroconf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/7e/b752fdae36f3f63243da26a6e490ac019a03f8134339cab1d82401008aca/pyatv-0.18.0.tar.gz", hash = "sha256:f650807f6d5c15460677152d38c97e83d22ddfe2113d63689e71d9a27b616c35", size = 1694735, upload-time = "2026-06-19T20:57:57.943Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/fa/5334e26d22cacd518a5d58836f48f1372126aba2711e93dca239906ed6ce/pyatv-0.18.0-py3-none-any.whl", hash = "sha256:3df6af5679eea809ff17954cf9f5d33c7e5ed5a8d1c90fa14090a0425ce5cd8a", size = 475244, upload-time = "2026-06-19T20:57:56.299Z" },
 ]
 
 [[package]]

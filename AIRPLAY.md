@@ -8,10 +8,12 @@ TL;DR:
 
 1. The actual streaming fix is **not our code**. It is an open, unreleased fix to
    `pyatv` (the `POST /command` *play-queue* protocol rewrite, upstream PR
-   **#2774 / #2899**), **linked as a git submodule** at `vendor/pyatv/`.
-2. A **small runtime monkey-patch** in our project — `src/airplay_yt/tvos_patch.py`
-   — plugs the one remaining gap on tvOS 26.6/27: injecting the Apple `psi`
-   that the modern receiver no longer hands back.
+   **#2774 / #2899**). It used to be linked as a git submodule at `vendor/pyatv/`;
+   it is now **applied at runtime** by `src/airplay_yt/play_queue_patch.py` on top
+   of stock `pyatv 0.18.0` from PyPI, so no fork or submodule is needed.
+2. A **small additional runtime monkey-patch** in our project —
+   `src/airplay_yt/tvos_patch.py` — plugs the one remaining gap on tvOS 26.6/27:
+   injecting the Apple `psi` that the modern receiver no longer hands back.
 3. `airplay.py` wires the two together, loads stored credentials by hand, and
    calls `atv.stream.play_url(...)`, letting `pyatv` stand up a short-lived HTTP
    server so no external media server is needed.
@@ -49,8 +51,9 @@ delivered. The correct protocol was written in an upstream pull request that is
   protocol"* (2026-07-29), which folds in PR **#2774** ("url playback broken on
   tvOS 26") / **#2899** ("Fix AirPlay to modern Apple TV tvOS").
 
-This is the bulk of the work, and **we did not write it** — it is pulled down
-(see *`vendor/pyatv`: origin and whether it is needed* below).
+This is the bulk of the work, and **we did not write it** — it is now carried as
+runtime monkey-patch code in `src/airplay_yt/play_queue_patch.py` (see
+*How the fix is carried now* below).
 
 ### 2. The `psi` on tvOS 26.6/27 (our gap)
 
@@ -125,12 +128,11 @@ clip — definitive proof the TV is fetching and rendering the video.
 
 ---
 
-## `vendor/pyatv`: origin, provenance, and whether it is needed
+## How the fix is carried now
 
 ### Where it came from
 
-`vendor/pyatv/` is a **verbatim copy** of the open-source fork of `pyatv`,
-pulled from:
+The play-queue protocol change was taken from the open-source fork of `pyatv`:
 
 ```
 https://github.com/mikelambert/pyatv.git
@@ -141,24 +143,22 @@ date    2026-07-29
 
 That commit folds in the upstream play-queue fix (PRs **#2774** and **#2899**).
 
-### Is it modified from upstream, or only pulled down to inspect?
+### How it is applied
 
-**It was only pulled down — it is byte-for-byte identical to upstream.** Verified
-by checking out the same commit on a fresh clone and diffing:
+`src/airplay_yt/play_queue_patch.py` applies that change at runtime, on top of
+whatever stock `pyatv` is installed, so the project depends only on the published
+PyPI package. It patches four modules:
 
-```
-$ diff -rq  <upstream @ b248409>/pyatv   vendor/pyatv/pyatv
-   (empty — the package source matches exactly)
-```
+| Module | Change |
+|---|---|
+| `pyatv.protocols.airplay.channels` | `EventChannelListener` interface, and event dispatch on `EventChannel` |
+| `pyatv.protocols.raop.protocols` | `StreamProtocol.wait_for_media_end()` default |
+| `pyatv.protocols.raop.protocols.airplayv2` | PTP video session, remote control session, play-queue `POST /command` commands, event-driven end of media |
+| `pyatv.protocols.airplay.player` | Stop polling `GET /playback-info` when the protocol reports media end itself |
 
-No code in `pyatv/` was changed by this project. Our *only* contribution to
-make video work is `tvos_patch.py` (a runtime monkey-patch, applied on import /
-connect), so we deliberately do **not** patch the vendored library in place.
-
-The copy also brings the upstream repo's non-package files (`CHANGES.md`,
-`docs/`, `tests/`, `.github/`, `LICENSE.md`, …). The committed copy is clean of
-build artifacts: `__pycache__/` and `*.egg-info/` are git-ignored and are **not**
-tracked (only ~554 real source files).
+`tvos_patch.py` then layers `psi` injection on top, because the play-queue path
+needs a remote control session that the tvOS 26.6/27 `GET /info` failure would
+otherwise block.
 
 ### Is it needed in the repo?
 
@@ -167,42 +167,54 @@ tracked (only ~554 real source files).
 * The fix is in an **unreleased fork / open PR**, not in any released `pyatv` on
   PyPI. `pyproject.toml` depends on `pyatv>=0.18.0`, and **0.18.0 is the last
   released version and does *not* contain the play-queue fix** — it is precisely
-  the version that fails on tvOS 26/27. So installing plain `pyatv` from PyPI
-  would regress the feature.
-* The dev venv has `pyatv` installed **editable** pointing at `vendor/pyatv/pyatv`
-  (`uv pip install -e vendor/pyatv` re-points it). That is what the working
-  `airplay.py` runs against today.
-* `pyproject.toml` records the **intended** reproduction path via
-  `[tool.uv.sources]` — a git source pinning the fork at `b248409`.
-* `vendor/pyatv/` remains as an **offline fallback** so the project works without
-  network access / cloning the fork.
+  the version that fails on tvOS 26/27. So stock `pyatv` needs the runtime patch
+  to work.
+* Unlike the earlier submodule, the patch does not vendor pyatv source or pin a
+  git revision: `uv.lock` resolves the ordinary PyPI release, and the patch is a
+  small, reviewable file in this repo that can be deleted once a released `pyatv`
+  contains the fix.
 
-#### ⚠️ Known inconsistency to reconcile
+Recommended path forward (once the PR merges upstream): delete
+`play_queue_patch.py` and `tvos_patch.py`, and depend on the released `pyatv`
+that contains both fixes.
 
-`uv.lock` still pins `pyatv` from the **PyPI registry at 0.18.0** (the *old*,
-non-working version), not the fork source. The live venv works only because of
-the manual editable install. Before shipping, reconcile the three so they agree:
+### ⚠️ On every pyatv version change
 
-* `pyproject.toml` `[tool.uv.sources] pyatv = { git = "...", rev = "b248409…" }`
-* `uv.lock` — currently points at PyPI 0.18.0 (must be regenerated to match)
-* venv — currently editable → `vendor/pyatv` (matches the fork intent)
+Both patch modules reach into pyatv internals, so they are pinned to the shape of
+the release they were written for (`0.18.0`). `pyproject.toml` pins
+`pyatv==0.18.0` for that reason. Before changing that version:
 
-Recommended path forward (once the PR merges upstream): drop `vendor/pyatv/`
-entirely and depend on the released `pyatv` that contains the play-queue fix;
-`tvos_patch.py` can stay for now as it is a harmless no-op that keeps working
-across versions.
+1. Check whether the play-queue fix (PRs #2774 / #2899) and the psi fix are now
+   in the released pyatv. If so, delete the corresponding patch module
+   (`play_queue_patch.py` / `tvos_patch.py`) and its `apply()` call in
+   `airplay.py` — do not keep patching a fix that already exists.
+2. If a patch is still needed, re-verify it: each module docstring lists every
+   pyatv module, method, signature, and attribute it touches. Update the patch
+   for anything that moved or was renamed.
+3. Re-test on a real tvOS 26/27 Apple TV. A patch that no longer applies is
+   quiet from the receiver's side — it accepts the legacy `POST /play` path and
+   plays no video.
+
+`apply()` returns `False` and logs the reason when it cannot patch, and
+`airplay.py` logs a warning per inactive patch, so check the logs after an
+upgrade.
+
+Part of this is automatic: `_pyatv_guard.py` records the expected pyatv version
+(must match the `pyatv==` pin in `pyproject.toml`) and warns on a mismatch, and
+each patch skips itself, with a log line, when the installed pyatv already
+provides the fix it would apply.
 
 ---
 
 ## How to reproduce / test
 
-From a freshly cloned repository the submodule must be initialized once (submodule
-contents are not pulled by a plain `git clone`): the editable venv
-`uv pip install -e vendor/pyatv` runs on top of that checkout.
+From a freshly cloned repository, `uv sync` installs stock `pyatv 0.18.0` from
+PyPI; the runtime patches apply themselves on the first stream. No submodule to
+initialize.
 
 ```bash
 cd /home/theron/Git/airplay-yt
-git submodule update --init vendor/pyatv      # checks out the pinned b248409
+uv sync
 
 # one-liner smoke test (blocks for the full clip; Ctrl-C when confirmed)
 .venv/bin/python -m airplay_yt.airplay test.mp4 "Living Room Apple TV"
